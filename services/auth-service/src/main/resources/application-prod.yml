@@ -1,0 +1,26 @@
+# Production. Every value comes from the environment — no defaults on purpose,
+# so a missing secret fails the app at startup instead of silently using
+# a development credential.
+spring:
+  jpa:
+    show-sql: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: never
+
+server:
+  error:
+    include-stacktrace: never
+    include-message: never
+    include-binding-errors: never
+
+logging:
+  level:
+    root: WARN
+    com.explorelk.auth: INFO

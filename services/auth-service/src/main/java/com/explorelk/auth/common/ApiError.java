@@ -1,0 +1,56 @@
+package com.explorelk.auth.common;
+
+import com.fasterxml.jackson.annotation.JsonInclude;
+
+import java.time.Instant;
+import java.util.List;
+
+/**
+ * The single error shape this service returns. Never varies by endpoint.
+ *
+ * <pre>
+ * {
+ *   "code": "VALIDATION_FAILED",
+ *   "message": "The request contains invalid values",
+ *   "timestamp": "2026-08-27T10:15:30Z",
+ *   "path": "/api/v1/auth/register",
+ *   "traceId": "a1b2c3d4",
+ *   "fieldErrors": [ { "field": "email", "message": "must be a well-formed email address" } ]
+ * }
+ * </pre>
+ *
+ * <p>{@code traceId} is echoed into the server log, so a user can quote it and it can
+ * be found without exposing the underlying exception. Exception messages never
+ * reach {@code message} — that text comes from {@link ErrorCode} only.
+ */
+@JsonInclude(JsonInclude.Include.NON_EMPTY)
+public record ApiError(
+        String code,
+        String message,
+        Instant timestamp,
+        String path,
+        String traceId,
+        List<FieldError> fieldErrors
+) {
+
+    public record FieldError(String field, String message) {
+    }
+
+    public static ApiError of(ErrorCode code, String path, String traceId) {
+        return new ApiError(code.name(), code.defaultMessage(), Instant.now(), path, traceId, List.of());
+    }
+
+    public static ApiError of(ErrorCode code, String message, String path, String traceId) {
+        return new ApiError(code.name(), message, Instant.now(), path, traceId, List.of());
+    }
+
+    public static ApiError validation(String path, String traceId, List<FieldError> fieldErrors) {
+        return new ApiError(
+                ErrorCode.VALIDATION_FAILED.name(),
+                ErrorCode.VALIDATION_FAILED.defaultMessage(),
+                Instant.now(),
+                path,
+                traceId,
+                fieldErrors);
+    }
+}

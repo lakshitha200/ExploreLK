@@ -1,0 +1,33 @@
+# Local development. Defaults match docker-compose.yml so the app runs
+# with no environment variables set at all.
+spring:
+  datasource:
+    url: ${DESTINATION_DB_URL:jdbc:postgresql://localhost:5433/explorelk_destination}
+    username: ${DESTINATION_DB_USERNAME:explorelk}
+    password: ${DESTINATION_DB_PASSWORD:explorelk}
+
+  # Seed content is a Flyway location, not a migration. It is added here and
+  # nowhere else, so production never loads it — application.yml lists only
+  # classpath:db/migration.
+  flyway:
+    locations: classpath:db/migration,classpath:db/seed
+
+  jpa:
+    show-sql: true
+    properties:
+      hibernate:
+        highlight_sql: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,env,configprops,beans,flyway
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  level:
+    com.explorelk.destination: DEBUG
+    org.flywaydb: INFO

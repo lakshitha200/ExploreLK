@@ -1,0 +1,87 @@
+spring:
+  application:
+    name: destination-service
+
+  profiles:
+    default: dev
+
+  datasource:
+    url: ${DESTINATION_DB_URL}
+    username: ${DESTINATION_DB_USERNAME}
+    password: ${DESTINATION_DB_PASSWORD}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      pool-name: destination-pool
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 10000
+
+  jpa:
+    # Flyway owns the schema. Hibernate only checks that the entities match it.
+    # Never set this to `update` — it silently drifts from the migrations, and here
+    # it would also try to manage the PostGIS `geog` column it knows nothing about.
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+        format_sql: true
+        # Categories are a LAZY many-to-many. Rendering a page of 20 destinations
+        # would otherwise fire 20 extra queries — the classic N+1. With batch
+        # fetching Hibernate collects the pending collections and loads them in
+        # one IN (...) query instead. Set globally so attractions get it too.
+        default_batch_fetch_size: 100
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: false
+    validate-on-migrate: true
+
+  jackson:
+    default-property-inclusion: non_null
+    deserialization:
+      fail-on-unknown-properties: true
+
+explorelk:
+  cors:
+    # Explicit per environment. Public reads are open, but writes are not, so the
+    # same allowlist discipline as auth-service applies.
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000,http://localhost:5173}
+
+server:
+  port: 8082
+  error:
+    include-stacktrace: never
+    include-message: never
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+      group:
+        # Redis joins this group in Step 8. Until then a readiness probe that
+        # checked a bean that does not exist would fail the container.
+        readiness:
+          include: readinessState,db
+  info:
+    env:
+      enabled: true
+
+info:
+  app:
+    name: ExploreLK Destination Service
+    version: 0.0.1-SNAPSHOT
+
+logging:
+  level:
+    com.explorelk.destination: INFO

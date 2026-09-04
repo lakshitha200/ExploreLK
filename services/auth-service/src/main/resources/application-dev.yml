@@ -1,0 +1,42 @@
+# Local development. Defaults match docker-compose.yml so the app runs
+# with no environment variables set at all.
+spring:
+  datasource:
+    url: ${AUTH_DB_URL:jdbc:postgresql://localhost:5433/explorelk_auth}
+    username: ${AUTH_DB_USERNAME:explorelk}
+    password: ${AUTH_DB_PASSWORD:explorelk}
+
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+
+  # MailHog. Nothing leaves the machine; read the inbox at http://localhost:8025
+  mail:
+    host: ${MAIL_HOST:localhost}
+    port: ${MAIL_PORT:1025}
+
+  jpa:
+    show-sql: true
+    properties:
+      hibernate:
+        highlight_sql: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,env,configprops,beans,flyway
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  level:
+    com.explorelk.auth: DEBUG
+    org.flywaydb: INFO
+    # NOTE: org.hibernate.orm.jdbc.bind at TRACE logs every JDBC bind parameter —
+    # which in this service means email addresses and BCrypt hashes in plain text.
+    # Left off deliberately. Turn it on for a single debugging session if you must,
+    # then delete the log file:
+    #   org.hibernate.orm.jdbc.bind: TRACE

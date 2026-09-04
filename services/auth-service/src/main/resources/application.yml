@@ -1,0 +1,119 @@
+spring:
+  application:
+    name: auth-service
+
+  profiles:
+    default: dev
+
+  datasource:
+    url: ${AUTH_DB_URL}
+    username: ${AUTH_DB_USERNAME}
+    password: ${AUTH_DB_PASSWORD}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      pool-name: auth-pool
+      maximum-pool-size: 10
+      minimum-idle: 2
+      connection-timeout: 10000
+
+  jpa:
+    # Flyway owns the schema. Hibernate only checks that the entities match it.
+    # Never set this to `update` — it silently drifts from the migrations.
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+        format_sql: true
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: false
+    validate-on-migrate: true
+
+  data:
+    redis:
+      host: ${REDIS_HOST}
+      port: ${REDIS_PORT:6379}
+      timeout: 2s
+      # Fail fast rather than hanging a login on an unreachable Redis. The denylist
+      # and rate limiter both degrade gracefully, so a short timeout is safe.
+      connect-timeout: 2s
+
+  mail:
+    host: ${MAIL_HOST}
+    port: ${MAIL_PORT:1025}
+    properties:
+      mail:
+        smtp:
+          auth: false
+          starttls:
+            enable: false
+          # Do not let a stalled mail server hold a worker thread.
+          connectiontimeout: 5000
+          timeout: 5000
+          writetimeout: 5000
+
+  jackson:
+    default-property-inclusion: non_null
+    deserialization:
+      fail-on-unknown-properties: true
+
+explorelk:
+  jwt:
+    # The `iss` claim. Other services reject tokens that do not carry their issuer,
+    # so a dev token cannot be replayed against production.
+    issuer: ${JWT_ISSUER:explorelk-auth}
+    # Short on purpose. An access token can only be revoked through the Redis
+    # denylist, so its lifetime bounds the damage from a leak.
+    access-token-ttl: ${JWT_ACCESS_TTL:15m}
+    # Long is fine: every use is checked against Postgres, so it can be revoked
+    # the moment anything looks wrong.
+    refresh-token-ttl: ${JWT_REFRESH_TTL:30d}
+    private-key: ${JWT_PRIVATE_KEY:file:./keys/private.pem}
+    public-key: ${JWT_PUBLIC_KEY:file:./keys/public.pem}
+
+  cors:
+    # Explicit per environment. Never '*' on an auth service.
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000,http://localhost:5173}
+
+  mail:
+    from: ${MAIL_FROM:no-reply@explorelk.lk}
+    # Where the links in emails point — the front end, not this service.
+    app-base-url: ${APP_BASE_URL:http://localhost:3000}
+
+server:
+  port: 8081
+  error:
+    include-stacktrace: never
+    include-message: never
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+      group:
+        readiness:
+          include: readinessState,db
+  info:
+    env:
+      enabled: true
+
+info:
+  app:
+    name: ExploreLK Auth Service
+    version: 0.0.1-SNAPSHOT
+
+logging:
+  level:
+    com.explorelk.auth: INFO
