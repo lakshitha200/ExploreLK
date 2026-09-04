@@ -2,20 +2,23 @@ package com.explorelk.destination.destination;
 
 import com.explorelk.destination.category.CategoryService;
 import com.explorelk.destination.common.PageResponse;
+import com.explorelk.destination.common.Pagination;
 import com.explorelk.destination.common.exception.NotFoundException;
 import com.explorelk.destination.common.exception.ValidationException;
 import com.explorelk.destination.destination.dto.DestinationDetailResponse;
 import com.explorelk.destination.destination.dto.DestinationSummaryResponse;
+import com.explorelk.destination.destination.dto.NearbyDestinationResponse;
 import com.explorelk.destination.search.DestinationQuery;
 import com.explorelk.destination.search.DestinationSearchSpecs;
 import com.explorelk.destination.search.DestinationSort;
+import com.explorelk.destination.search.NearbyQuery;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.domain.Page;
-import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -32,13 +35,12 @@ import java.util.UUID;
 public class DestinationService {
 
     /**
-     * An uncapped page size is a free denial-of-service on a public endpoint:
-     * {@code ?size=1000000} would materialise the whole table and every category
-     * collection on it. Clamped rather than rejected — a client asking for too
-     * much gets the maximum, not an error.
+     * The limits live in {@link Pagination} now that the admin list endpoints
+     * share them; these stay as the names the public API documentation and the
+     * controller javadoc refer to.
      */
-    public static final int MAX_PAGE_SIZE = 100;
-    public static final int DEFAULT_PAGE_SIZE = 20;
+    public static final int MAX_PAGE_SIZE = Pagination.MAX_PAGE_SIZE;
+    public static final int DEFAULT_PAGE_SIZE = Pagination.DEFAULT_PAGE_SIZE;
 
     private final DestinationRepository destinationRepository;
     private final CategoryService categoryService;
@@ -59,10 +61,7 @@ public class DestinationService {
                                                          String direction) {
         requireKnownCategory(query.category());
 
-        Pageable pageable = PageRequest.of(
-                Math.max(page, 0),
-                clampSize(size),
-                DestinationSort.from(sort).toSort(direction));
+        Pageable pageable = Pagination.of(page, size, DestinationSort.from(sort).toSort(direction));
 
         Page<Destination> results =
                 destinationRepository.findAll(DestinationSearchSpecs.publicSearch(query), pageable);
@@ -88,6 +87,31 @@ public class DestinationService {
         return DestinationDetailResponse.from(destination);
     }
 
+    /**
+     * Published destinations near a point, nearest first.
+     *
+     * <p>The only spatial read in the service. It bypasses the Criteria API and
+     * goes straight to a native query, because {@code ST_DWithin} and the
+     * {@code <->} nearest-neighbour operator have no JPA equivalent — and because
+     * mapping the {@code geog} column into an entity to get them would drag in
+     * hibernate-spatial, JTS types and a dialect swap for one endpoint.
+     *
+     * <p><strong>Not cached</strong>, now or in Step 8. The key space is every
+     * {@code (lat, lng, radius)} a phone GPS ever emits, so the hit rate is near
+     * zero and Redis fills with entries nobody reads twice. If it ever needs
+     * caching, round the coordinates to about three decimals first to create real
+     * buckets — but measure before bothering, because the GiST index is already
+     * the fast path.
+     */
+    @Transactional(readOnly = true)
+    public List<NearbyDestinationResponse> findNearby(NearbyQuery query) {
+        return destinationRepository.findNearby(
+                        query.latitude(), query.longitude(), query.radiusMeters(), query.limit())
+                .stream()
+                .map(NearbyDestinationResponse::from)
+                .toList();
+    }
+
     // ── Internals ────────────────────────────────────────────────────────────
 
     /**
@@ -100,10 +124,6 @@ public class DestinationService {
         if (category != null && !categoryService.exists(category)) {
             throw new ValidationException("category", "is not a known category code");
         }
-    }
-
-    private static int clampSize(int size) {
-        return size <= 0 ? DEFAULT_PAGE_SIZE : Math.min(size, MAX_PAGE_SIZE);
     }
 
     private static Optional<UUID> asUuid(String value) {

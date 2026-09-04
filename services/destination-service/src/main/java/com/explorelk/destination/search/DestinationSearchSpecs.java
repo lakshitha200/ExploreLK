@@ -76,26 +76,63 @@ public final class DestinationSearchSpecs {
                 cb.equal(cb.lower(root.get("province")), province.toLowerCase(Locale.ROOT));
     }
 
+    /** Exactly one publication state — the admin list filter. */
+    public static Specification<Destination> hasStatus(ContentStatus status) {
+        return (root, query, cb) -> cb.equal(root.get("status"), status);
+    }
+
     /**
      * Everything a public list request asks for, always AND-ed with
      * {@link #published()}.
      */
     public static Specification<Destination> publicSearch(DestinationQuery query) {
-        Specification<Destination> spec = published();
+        return filters(query, published());
+    }
+
+    /**
+     * The admin list: the same filters, but without the publication constraint,
+     * so drafts and archived content are visible.
+     *
+     * @param status when given, narrows to one state; when null, returns all three
+     */
+    public static Specification<Destination> adminSearch(DestinationQuery query, ContentStatus status) {
+        return filters(query, status == null ? null : hasStatus(status));
+    }
+
+    /** The filter composition both list endpoints share. */
+    private static Specification<Destination> filters(DestinationQuery query,
+                                                      Specification<Destination> base) {
+        Specification<Destination> spec = base;
 
         if (query.search() != null) {
-            spec = spec.and(matchesText(query.search()));
+            spec = and(spec, matchesText(query.search()));
         }
         if (query.category() != null) {
-            spec = spec.and(hasCategory(query.category()));
+            spec = and(spec, hasCategory(query.category()));
         }
         if (query.district() != null) {
-            spec = spec.and(inDistrict(query.district()));
+            spec = and(spec, inDistrict(query.district()));
         }
         if (query.province() != null) {
-            spec = spec.and(inProvince(query.province()));
+            spec = and(spec, inProvince(query.province()));
         }
-        return spec;
+        return spec == null ? unfiltered() : spec;
+    }
+
+    /**
+     * Null-tolerant AND, because the admin search legitimately starts from no
+     * constraint at all. {@code Specification.and} is an instance method, so the
+     * obvious {@code spec = spec.and(next)} throws on the first filter when there
+     * is no base specification to build on.
+     */
+    private static Specification<Destination> and(Specification<Destination> spec,
+                                                  Specification<Destination> next) {
+        return spec == null ? next : spec.and(next);
+    }
+
+    /** Matches every row. Reads better at a call site than a null Specification. */
+    private static Specification<Destination> unfiltered() {
+        return (root, query, cb) -> cb.conjunction();
     }
 
     /** Treats the LIKE metacharacters as literals. Escape char is backslash. */

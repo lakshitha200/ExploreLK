@@ -5,7 +5,10 @@ import com.explorelk.destination.common.exception.ValidationException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.ConstraintViolationException;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.ResponseEntity;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.MissingServletRequestParameterException;
@@ -137,6 +140,67 @@ public class GlobalExceptionHandler {
 
         return ResponseEntity.status(ErrorCode.MALFORMED_REQUEST.status())
                 .body(ApiError.of(ErrorCode.MALFORMED_REQUEST, request.getRequestURI(), traceId));
+    }
+
+    /**
+     * Two admins edited the same row and the second one lost.
+     *
+     * <p>Hibernate raises this at flush time when the {@code @Version} column has
+     * moved since the entity was loaded. Without this handler it would fall
+     * through to {@link #handleUnexpected} and surface as a 500 — telling the
+     * admin the server is broken when in fact their colleague simply saved first
+     * and the right response is "reload and try again".
+     */
+    @ExceptionHandler(ObjectOptimisticLockingFailureException.class)
+    public ResponseEntity<ApiError> handleOptimisticLock(ObjectOptimisticLockingFailureException ex,
+                                                         HttpServletRequest request) {
+        String traceId = newTraceId();
+        log.info("[{}] optimistic lock clash at {}: {}", traceId, request.getRequestURI(), ex.getMessage());
+
+        return ResponseEntity.status(ErrorCode.CONFLICT.status())
+                .body(ApiError.of(ErrorCode.CONFLICT, request.getRequestURI(), traceId));
+    }
+
+    /**
+     * A CHECK or unique constraint refused the write.
+     *
+     * <p>The service layer validates the same rules first, so reaching here means
+     * either a race — two requests creating the same slug at once — or a rule the
+     * database enforces and the application does not yet. Both are conflicts, and
+     * both are worth a warning in the log rather than an info line: the second
+     * case is a gap to close.
+     */
+    @ExceptionHandler(DataIntegrityViolationException.class)
+    public ResponseEntity<ApiError> handleIntegrity(DataIntegrityViolationException ex,
+                                                    HttpServletRequest request) {
+        String traceId = newTraceId();
+        log.warn("[{}] constraint violation at {}", traceId, request.getRequestURI(), ex);
+
+        return ResponseEntity.status(ErrorCode.CONFLICT.status())
+                .body(ApiError.of(ErrorCode.CONFLICT, request.getRequestURI(), traceId));
+    }
+
+    /**
+     * A method-security rule refused the call.
+     *
+     * <p>Easy to miss and expensive when missed: {@code @PreAuthorize} throws
+     * inside the MVC dispatch, which means this advice sees the exception before
+     * Spring Security's {@code ExceptionTranslationFilter} ever could. Without
+     * this handler the catch-all below turns every authorization failure into a
+     * 500, and the "a TRAVELER token gets 403" checkpoint fails in a way that
+     * looks like a server bug.
+     *
+     * <p>Anonymous callers never arrive here — the filter chain challenges them
+     * with a 401 first — so 403 is always the right answer at this point.
+     */
+    @ExceptionHandler(AccessDeniedException.class)
+    public ResponseEntity<ApiError> handleAccessDenied(AccessDeniedException ex,
+                                                       HttpServletRequest request) {
+        String traceId = newTraceId();
+        log.info("[{}] access denied at {}", traceId, request.getRequestURI());
+
+        return ResponseEntity.status(ErrorCode.FORBIDDEN.status())
+                .body(ApiError.of(ErrorCode.FORBIDDEN, request.getRequestURI(), traceId));
     }
 
     /** Last resort. Something is genuinely broken, so log the stack trace. */

@@ -46,6 +46,26 @@ spring:
       fail-on-unknown-properties: true
 
 explorelk:
+  auth:
+    # The Auth Service's public key set. Fetched once at first use and cached;
+    # after that every token is verified with local RSA math, so this service
+    # makes no call to the Auth Service on the request path.
+    jwks-uri: ${AUTH_JWKS_URI:http://localhost:8081/.well-known/jwks.json}
+    # The `iss` claim every accepted token must carry. Matches auth-service's
+    # explorelk.jwt.issuer, so a token minted by a dev Auth Service cannot be
+    # replayed against production.
+    issuer: ${JWT_ISSUER:explorelk-auth}
+    # How long a fetched key set is used before refreshing.
+    jwks-cache-ttl: 5m
+    # How long a STALE key set keeps being accepted while the Auth Service is
+    # unreachable. This is what makes "auth is down, issued tokens still work"
+    # a guarantee rather than a hope. Signing keys do not rotate hourly.
+    jwks-outage-ttl: 24h
+    # Bounds the JWKS HTTP call, and doubles as the minimum interval between
+    # refresh attempts, so unknown-kid tokens cannot be turned into a flood of
+    # requests aimed at the Auth Service.
+    jwks-refresh-timeout: 15s
+
   cors:
     # Explicit per environment. Public reads are open, but writes are not, so the
     # same allowlist discipline as auth-service applies.

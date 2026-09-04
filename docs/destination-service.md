@@ -155,20 +155,32 @@ Destination: Ella                        Attraction: Nine Arches Bridge
 
 Public endpoints only ever return `PUBLISHED` content. `DRAFT` and `ARCHIVED` rows are invisible without an admin token — enforced in the repository layer, not in the controller, so a new endpoint cannot forget.
 
+> **An attraction is public only if its destination is too.** An attraction is not independently browsable content; it exists in the context of a place. So archiving Ella takes Nine Arches Bridge off `/attractions/{id}` and out of `/attractions/nearby` with it, whatever the attraction's own status says. Without that rule, archived content stays reachable through a nested id and nobody notices for months. The condition is written into the JPQL of every public attraction finder rather than passed in as a parameter, so there is no call site that could omit it.
+
 ### Admin — `ADMIN` or `SUPER_ADMIN` token required
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | `/api/v1/admin/destinations` | List **including** drafts and archived |
+| GET | `/api/v1/admin/destinations` | List **including** drafts and archived. Extra param: `status` |
+| GET | `/api/v1/admin/destinations/{idOrSlug}` | One destination in any status — preview a draft |
 | POST | `/api/v1/admin/destinations` | Create — starts as `DRAFT` |
 | PATCH | `/api/v1/admin/destinations/{id}` | Partial update |
 | PATCH | `/api/v1/admin/destinations/{id}/status` | `DRAFT` / `PUBLISHED` / `ARCHIVED` |
 | DELETE | `/api/v1/admin/destinations/{id}` | Archives — see §5, this is not a row delete |
+| GET | `/api/v1/admin/destinations/{id}/attractions` | Attractions in any status |
 | POST | `/api/v1/admin/destinations/{id}/attractions` | Create an attraction |
+| GET | `/api/v1/admin/attractions/{id}` | One attraction in any status |
 | PATCH | `/api/v1/admin/attractions/{id}` | Partial update |
 | PATCH | `/api/v1/admin/attractions/{id}/status` | Status change |
 | DELETE | `/api/v1/admin/attractions/{id}` | Archives |
 | POST | `/api/v1/admin/categories` | Add a category to the vocabulary |
+
+> **The three admin `GET`s were not in the original list and are not decoration.**
+> An admin has to be able to look at what they are writing before it goes live,
+> and an archived attraction has to stay reachable by id after the public
+> endpoint stops returning it — otherwise "archive, then restore" is a round trip
+> through the database. Nothing else changed: every write is still exactly one of
+> the operations above.
 
 ### Platform
 
@@ -398,20 +410,37 @@ Evict **after commit**, not inside the transaction — `@TransactionalEventListe
 
 ## 9. Security requirements
 
-**Authentication** — `spring-boot-starter-oauth2-resource-server`, pointed at the Auth Service:
+**Authentication** — `spring-boot-starter-oauth2-resource-server`, pointed at the Auth Service. The config lives under `explorelk.auth` rather than in Spring's own `spring.security.oauth2.resourceserver.jwt` block:
 
 ```yaml
-spring:
-  security:
-    oauth2:
-      resourceserver:
-        jwt:
-          jwk-set-uri: ${AUTH_JWKS_URI:http://localhost:8081/.well-known/jwks.json}
+explorelk:
+  auth:
+    jwks-uri: ${AUTH_JWKS_URI:http://localhost:8081/.well-known/jwks.json}
+    issuer: ${JWT_ISSUER:explorelk-auth}
+    jwks-cache-ttl: 5m          # how long a fetched key set is used
+    jwks-outage-ttl: 24h        # how long a STALE key set is used while auth is down
+    jwks-refresh-timeout: 15s   # HTTP timeout, and the minimum interval between fetches
 ```
+
+> **Why not Spring's block.** `issuer-uri` there means OIDC discovery over HTTP, and our issuer is the bare name `explorelk-auth`, not a URL — pointing Spring at it makes the app try to fetch `/.well-known/openid-configuration` from a host that does not exist. And the two TTLs are load-bearing (below), so they belong somewhere a reader can find rather than in whichever defaults the library ships this quarter. `SecurityConfig` therefore builds the `JwtDecoder` by hand from a Nimbus `JWKSourceBuilder` instead of using `NimbusJwtDecoder.withJwkSetUri`.
+
+Three cache behaviours are configured explicitly, and each one is there for a reason:
+
+| Setting | What it buys |
+| --- | --- |
+| cache | The key set is fetched once. Every verification in between is local RSA math — no call to the Auth Service on the request path. |
+| rate limiting | A flood of tokens carrying an unknown `kid` cannot become a flood of HTTP calls to the Auth Service. Without it this endpoint is a free amplifier aimed at auth. |
+| outage tolerance | When a refresh fails because the Auth Service is down, the **stale** key set keeps being accepted for `jwks-outage-ttl`. Signing keys do not rotate hourly, and a catalog that starts rejecting valid tokens because an unrelated service is restarting is the exact coupling this design removes. |
+
+> **The outage tolerance protects a warm cache, not a cold start.** If this service is restarted while the Auth Service is down, it has no key set and cannot get one — every token is then rejected until auth comes back. That is correct and unavoidable: there is nothing to verify against. It is worth knowing before someone reads it as a bug during a deploy.
 
 Reuse the Auth Service's `JwtAuthenticationConverter` idea verbatim: the `role` claim is a single value, and Spring's `hasRole('ADMIN')` looks for an authority named literally `ROLE_ADMIN`. Forgetting that prefix is the classic cause of "my `@PreAuthorize` always returns 403".
 
+> The claim holds one string, not a list, so the stock `JwtGrantedAuthoritiesConverter` is **not** usable here — it expects a collection and quietly produces no authorities at all, which looks identical to a missing role.
+
 Validate the `iss` claim against the expected issuer (`explorelk-auth`) as well, so a token minted by a dev Auth Service cannot be replayed against production.
+
+> **One handler that is easy to miss and expensive when missed.** `@PreAuthorize` throws `AuthorizationDeniedException` *inside* the MVC dispatch, so a `@RestControllerAdvice` sees it before Spring Security's `ExceptionTranslationFilter` ever could. Without an explicit `AccessDeniedException` handler, the catch-all turns every method-security denial into a `500` — and "a TRAVELER token gets 403" fails in a way that reads as a server bug. `GlobalExceptionHandler` has one.
 
 **Authorization**
 
@@ -452,20 +481,24 @@ com.explorelk.destination
 │
 ├── config/
 │   ├── SecurityConfig.java          # resource server, JWKS, RBAC rules, CORS
-│   ├── CacheConfig.java             # RedisCacheManager, per-cache TTL, error handler
+│   ├── AuthServerProperties.java    # explorelk.auth — jwks uri, issuer, cache TTLs
+│   ├── CorsProperties.java
+│   ├── CacheConfig.java             # Step 8 — RedisCacheManager, TTLs, error handler
 │   ├── KafkaConfig.java             # Step 9
-│   └── OpenApiConfig.java
+│   └── OpenApiConfig.java           # Step 11
 │
 ├── category/
 │   ├── Category.java
 │   ├── CategoryRepository.java
-│   ├── CategoryService.java
+│   ├── CategoryService.java         # read, resolve codes on writes, create
 │   ├── CategoryController.java      # GET /categories
+│   ├── CategoryAdminController.java # POST /admin/categories
 │   └── dto/
 │
 ├── destination/
 │   ├── Destination.java  ContentStatus.java
-│   ├── DestinationRepository.java   # + DestinationSpatialRepository (native queries)
+│   ├── DestinationRepository.java   # plain JPA + the one native nearby query
+│   ├── NearbyDestinationProjection.java
 │   ├── DestinationService.java      # public reads, caching
 │   ├── DestinationAdminService.java # writes, status transitions, eviction
 │   ├── DestinationController.java   # /api/v1/destinations
@@ -474,7 +507,9 @@ com.explorelk.destination
 │
 ├── attraction/
 │   ├── Attraction.java
-│   ├── AttractionRepository.java
+│   ├── AttractionRepository.java    # + the native nearby query
+│   ├── NearbyAttractionProjection.java
+│   ├── OpeningHoursCodec.java       # validates the JSONB shape before it is stored
 │   ├── AttractionService.java
 │   ├── AttractionAdminService.java
 │   ├── AttractionController.java
@@ -482,7 +517,10 @@ com.explorelk.destination
 │   └── dto/
 │
 ├── search/
-│   └── DestinationSearchSpecs.java  # JPA Specifications: search + category + district
+│   ├── DestinationQuery.java        # the filter set, normalized
+│   ├── DestinationSearchSpecs.java  # JPA Specifications: search + category + district
+│   ├── DestinationSort.java         # the sort whitelist
+│   └── NearbyQuery.java             # lat/lng validated, radius and limit clamped
 │
 ├── outbox/                          # Step 9 — copied from auth-service
 │   ├── OutboxEvent.java  OutboxRepository.java
@@ -494,7 +532,9 @@ com.explorelk.destination
     ├── ErrorCode.java
     ├── GlobalExceptionHandler.java
     ├── PageResponse.java            # the {items, page, size, totalItems} wrapper
+    ├── Pagination.java              # the size/page clamps, shared by both list paths
     ├── SlugGenerator.java
+    ├── dto/UpdateStatusRequest.java # shared by destinations and attractions
     └── exception/
 ```
 
@@ -504,8 +544,16 @@ src/main/resources/
 ├── application-dev.yml
 ├── application-prod.yml
 ├── db/migration/V1__init.sql
+├── db/migration/V2__search_indexes.sql
 └── db/seed/R__seed_catalog.sql      # dev profile only
 ```
+
+> There is no `WebConfig` any more. It registered CORS at the MVC level, which was
+> right while Spring Security was absent and wrong the moment it arrived: Security
+> applies CORS in its own filter, long before MVC runs, so an MVC-only registration
+> lets a preflight be rejected as unauthenticated before a single CORS header is
+> written. The configuration moved into `SecurityConfig` rather than being
+> duplicated there.
 
 > **Why `DestinationService` and `DestinationAdminService` are separate classes.** Public reads are cached, filtered to `PUBLISHED`, and never write. Admin operations write, evict, emit events, and see everything. Merging them produces one class where every method has to remember which world it is in — and the day someone forgets, drafts leak onto the public endpoint. Two classes make the boundary structural.
 
@@ -624,37 +672,78 @@ AUTH_JWKS_URI=http://localhost:8081/.well-known/jwks.json
 
 ---
 
-### Step 5 — Security: the first service to trust the Auth Service
+### Step 5 — Security: the first service to trust the Auth Service ✅
 
-Add the resource server, `SecurityConfig`, the role converter, and the admin CRUD for destinations (`POST`, `PATCH`, `PATCH /status`, `DELETE` → archive). Slug generation, publish-time validation, status transition rules.
+`spring-boot-starter-oauth2-resource-server`, `SecurityConfig`, `AuthServerProperties`, the role converter, `SlugGenerator`, `Pagination`, and the admin CRUD for destinations (`GET` list, `GET` one, `POST`, `PATCH`, `PATCH /status`, `DELETE` → archive) plus `POST /admin/categories`. Slug generation, publish-time validation, status transition rules, optimistic locking.
 
-**Checkpoint — this is the milestone of the whole service:**
+**Checkpoint — this is the milestone of the whole service. All five verified:**
 
-1. `POST /api/v1/admin/destinations` with **no** token → `401`
-2. Log in to the **Auth Service** as a TRAVELER, use that token → `403`
-3. Log in as the SUPER_ADMIN, use that token → `201`, and the row lands as `DRAFT`
-4. The new destination does **not** appear on the public list until you publish it
-5. Stop the Auth Service entirely, then reuse the admin token → **still works** (JWKS is cached)
+1. `POST /api/v1/admin/destinations` with **no** token → `401 UNAUTHORIZED`
+2. TRAVELER token from the Auth Service → `403 FORBIDDEN`
+3. SUPER_ADMIN token → `201`, slug `trincomalee` generated from the name, row lands as `DRAFT`
+4. It does not appear on `GET /destinations` and `GET /destinations/trincomalee` 404s until `PATCH /status` publishes it — then both change together
+5. Auth Service killed outright, admin token reused → **`201`**. Public reads unaffected, TRAVELER still `403`
 
-Point 5 is the payoff for RS256 and JWKS. Verify it explicitly.
+> **Point 5 is the payoff for RS256 and JWKS, and it is worth being precise about what it promises.** The cache is warm or it is not. A service that has already fetched the key set keeps working for `jwks-outage-ttl` (24 h) with auth down — verified. A service *restarted* while auth is down has nothing to verify against and rejects everything until auth returns; that showed up during this very checkpoint, on the restart between the two halves of the test. It is correct behaviour, not a regression, and §9 now says so.
 
-> This step needs Auth **Step 10** finished, because it needs a real ADMIN account to test with. Do the super-admin bootstrap first.
+> **Auth Step 10 is still not done, so the SUPER_ADMIN was made by hand:** register normally, verify the email, then `UPDATE users SET role='SUPER_ADMIN' WHERE email=…` in `explorelk_auth`. That unblocks this step without pretending the bootstrap exists. Do the real one before anything depends on creating admins through an API.
 
----
-
-### Step 6 — Attractions
-
-Nested create (`POST /admin/destinations/{id}/attractions`), update, status, archive. Public `GET /destinations/{idOrSlug}/attractions` and `GET /attractions/{id}`. Opening hours as JSONB, fee and `is_free` handling.
-
-**Checkpoint:** Nine Arches Bridge sits under Ella, is returned by the public attraction list once published, and archiving it removes it from that list while `GET /attractions/{id}` still resolves for an admin.
+> **Three decisions worth keeping.**
+>
+> 1. **A taken slug is a `409`, not an auto-suffix.** `ella-2` would be created silently, live in a URL forever, and be indistinguishable from `ella` in any admin list. A conflict asks the person who knows to pick a distinguishing name, which is information only they have.
+> 2. **`PATCH` sends the `version` it read.** Optimistic locking that only fires at flush time protects the database and tells the admin nothing useful; checking the version on the way in turns the common case into a clean `409` before any work happens. The database check stays as the backstop for the genuine race.
+> 3. **Writes are flushed before the response is built.** `@Version` and `@LastModifiedDate` are written *by* the flush, so mapping the entity beforehand returns the version the edit started from — and the admin's next save is then rejected as a conflict with themselves. Found by doing exactly that during the checkpoint.
 
 ---
 
-### Step 7 — Nearby (PostGIS)
+### Step 6 — Attractions ✅
 
-Native queries with `ST_DWithin` + `<->` ordering, exposed as `/destinations/nearby` and `/attractions/nearby`, returning `distanceKm` on each row. Clamp `radiusKm` and `limit`.
+Nested create (`POST /admin/destinations/{id}/attractions`), update, status, archive, plus the admin reads. Public `GET /destinations/{idOrSlug}/attractions` and `GET /attractions/{id}`. Opening hours as JSONB, fee and `is_free` handling.
 
-**Checkpoint:** `?lat=6.8667&lng=81.0466&radiusKm=10` returns Ella first with `distanceKm` near 0, ordered outward. Then run `EXPLAIN ANALYZE` on the query and confirm it says **Index Scan** using the GiST index, not Seq Scan. Finally swap lat and lng in the request and watch the results become empty — that is the §0 bug, seen once on purpose.
+**Checkpoint:** Koneswaram Temple created under Trincomalee as a `DRAFT`, invisible publicly; published, and it appears on the public attraction list with its opening hours as a JSON **object**; archived, and it leaves that list and `GET /attractions/{id}` 404s — while `GET /admin/attractions/{id}` still resolves it as `ARCHIVED`. `DELETE` twice is `204` both times.
+
+> **Opening hours are validated in code, not by the column.** Postgres checks that JSONB is valid JSON and nothing else — `{"funday": ["25:99", "banana"]}` is valid JSON. `OpeningHoursCodec` checks day names and `HH:mm` times, rejects a day that opens and closes at the same moment, and rebuilds the map in week order so two identical schedules serialize identically. Times that run *backwards* are allowed on purpose: a night market really does open at 20:00 and close at 02:00.
+>
+> **`@JsonRawValue` on the response field.** The entity holds the hours as a string because nothing queries inside them. Serializing that normally produces `"openingHours": "{\"mon\":[...]}"` — an escaped string the client parses a second time. `@JsonRawValue` writes the stored JSON straight through.
+>
+> **A `free` attraction with a positive fee is a field error, not a constraint violation.** `ck_attractions_free_fee` catches it too, but a database constraint reaches the admin as a generic conflict; the service check names the field to fix. A *zero* fee alongside `free` is allowed — that is the same fact stated twice, not a contradiction.
+
+
+---
+
+### Step 7 — Nearby (PostGIS) ✅
+
+Native queries with `ST_DWithin` + `<->` ordering, exposed as `/destinations/nearby` and `/attractions/nearby`, returning `distanceKm` on each row. `NearbyQuery` clamps `radiusKm` and `limit`.
+
+**Checkpoint, all four parts:**
+
+```
+?lat=6.8667&lng=81.0466&radiusKm=100     Ella 0.0 · Nuwara Eliya 29.902 · Kandy 65.41 · Yala 74.262 · Arugam Bay 87.379
+attractions ?radiusKm=5                  Little Adam's Peak 0.967 · Nine Arches Bridge 1.866
+?radiusKm=99999&limit=100000             5 rows, farthest 87.379 km  (clamped to 100 km / 50)
+swap lat and lng                         []
+```
+
+`EXPLAIN ANALYZE` on the destination query, with the real seed data and **no** `enable_seqscan` tricks:
+
+```
+Limit
+  ->  Index Scan using ix_destinations_geog on destinations d
+        Index Cond: ((geog IS NOT NULL) AND (geog && _st_expand(…, 100000)))
+        Order By: (geog <-> …)
+```
+
+Nine Arches Bridge at 1.866 km matches the 1.87 km measured by hand back in Step 2, which is the useful part: the endpoint agrees with the schema.
+
+> **Three things in the SQL are deliberate and each one is load-bearing.**
+>
+> 1. **The origin expression is written out three times instead of being lifted into a CTE.** A CTE referenced more than once is not inlined by Postgres — it is materialised as its own node, and the `ST_DWithin` argument then stops being a constant the planner can push into the index. The answer stays correct and arrives via a sequential scan. Repetition buys the index scan above.
+> 2. **Aliases are double-quoted.** Unquoted identifiers come back folded to lower case, and the interface projections bind by property name — `distancekm` would never reach `getDistanceKm()`, and the field would silently be null.
+> 3. **Bind parameters are explicitly `CAST`.** An untyped parameter inside `ST_MakePoint` leaves Postgres unable to infer a type, and the query fails at prepare time.
+>
+> **`/nearby` returns its own response shape**, not `DestinationSummaryResponse` with a distance added. It is one native statement that cannot cheaply carry category tags — one extra query per row would undo the point of using the index — so the two shapes stay separate and the absence is a documented contract rather than a surprise.
+>
+> **Coordinates are rejected, radius and limit are clamped.** A latitude of 200 is a caller bug and quietly correcting it would answer for somewhere else entirely; a 5000 km radius is a reasonable thing to ask and an unreasonable thing to serve. Without the clamps, `?radiusKm=20000&limit=100000` is an unauthenticated request to sort the whole table by distance.
 
 ---
 
@@ -668,7 +757,7 @@ Native queries with `ST_DWithin` + `<->` ordering, exposed as `/destinations/nea
 
 ### Step 9 — Outbox + Kafka events
 
-Copy `outbox_events`, `OutboxWriter` and `OutboxPublisher` from `auth-service` as `V2__outbox.sql`. Write event rows in the same transaction as each publish / update / archive. Publish the six event types from §7.
+Copy `outbox_events`, `OutboxWriter` and `OutboxPublisher` from `auth-service` as **`V3__outbox.sql`** — `V2` is the corrected search indexes from Step 4. Write event rows in the same transaction as each publish / update / archive. Publish the six event types from §7.
 
 **Checkpoint:** publish a destination, see `DESTINATION_PUBLISHED` in Kafka UI. Stop Kafka, edit an attraction, restart Kafka — the event still arrives. That test is the whole point of the outbox.
 
@@ -715,19 +804,19 @@ Steps 3 and 4 come **before** security on purpose. Public reads need no token, s
 
 ## 13. Definition of done
 
-- [ ] A traveler can list, search, filter and open destinations with no token
-- [ ] A traveler can see the attractions of a destination, with visit durations
-- [ ] `/nearby` returns correct distances in the right order, using the GiST index
-- [ ] An ADMIN token from the Auth Service can create, edit, publish and archive; a TRAVELER token gets 403
-- [ ] The Destination Service verifies tokens with **no** runtime dependency on the Auth Service being up
-- [ ] Drafts and archived content are never visible on a public endpoint
-- [ ] Archiving never deletes a row — every id stays resolvable for other services
-- [ ] Repeated reads are served from Redis, and a write invalidates them
-- [ ] Redis down = slower, not broken
-- [ ] All six events reach Kafka, and survive Kafka being restarted
-- [ ] `mvn verify` passes from a clean database
-- [ ] `docker compose up` works on a clean machine
-- [ ] Seed data is real Sri Lankan content, good enough for Trip and Itinerary development
+- [x] A traveler can list, search, filter and open destinations with no token
+- [x] A traveler can see the attractions of a destination, with visit durations
+- [x] `/nearby` returns correct distances in the right order, using the GiST index
+- [x] An ADMIN token from the Auth Service can create, edit, publish and archive; a TRAVELER token gets 403
+- [x] The Destination Service verifies tokens with **no** runtime dependency on the Auth Service being up — once its key cache is warm; see §9
+- [x] Drafts and archived content are never visible on a public endpoint
+- [x] Archiving never deletes a row — every id stays resolvable for other services
+- [ ] Repeated reads are served from Redis, and a write invalidates them — Step 8
+- [ ] Redis down = slower, not broken — Step 8
+- [ ] All six events reach Kafka, and survive Kafka being restarted — Step 9
+- [ ] `mvn verify` passes from a clean database — Step 10, and `src/test` is still empty
+- [ ] `docker compose up` works on a clean machine — Step 11, no Dockerfile and no compose entry yet
+- [x] Seed data is real Sri Lankan content, good enough for Trip and Itinerary development
 
 ---
 

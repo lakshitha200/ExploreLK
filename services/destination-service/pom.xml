@@ -72,6 +72,24 @@
             <artifactId>flyway-database-postgresql</artifactId>
         </dependency>
 
+        <!--
+            Security: verify only.
+
+            This service never holds a signing key and never mints a token. It
+            fetches the Auth Service's public key from /.well-known/jwks.json,
+            caches it, and checks signatures locally — so authorization costs no
+            network call per request and survives the Auth Service being down.
+            See SecurityConfig.
+
+            The starter pulls in spring-security-oauth2-jose transitively, which is
+            what does the RSA verification; it is not declared directly because
+            nothing here signs anything.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
+        </dependency>
+
         <!-- Validation -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -100,9 +118,6 @@
 
         <!--
             Added in later steps, listed here so the order is not a mystery:
-              Step 5  spring-boot-starter-security
-                      spring-boot-starter-oauth2-resource-server  (verify only —
-                      this service never holds a signing key)
               Step 8  spring-boot-starter-data-redis
               Step 9  spring-kafka
               Step 10 testcontainers (postgis image), rest-assured
