@@ -1,0 +1,35 @@
+# Test profile. The database, Redis and JWKS URLs are all injected at runtime by
+# TestContainers/@DynamicPropertySource -- nothing here points at a real service.
+spring:
+  jpa:
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: false
+        highlight_sql: false
+
+  flyway:
+    # Seed data included, exactly as in dev. The integration tests assert against
+    # the real Sri Lankan catalog rather than inventing fixtures, so a change to
+    # the seed that breaks the product breaks the build too.
+    locations: classpath:db/migration,classpath:db/seed
+
+explorelk:
+  events:
+    # Off by default: only the Kafka test turns it on, and it does so with its own
+    # broker. Leaving it enabled would make every other test wait five seconds per
+    # write for a producer that has nowhere to send.
+    enabled: false
+
+  cache:
+    destination: 1h
+    destination-list: 10m
+    attractions-of: 1h
+    categories: 24h
+
+logging:
+  level:
+    root: WARN
+    com.explorelk.destination: INFO
+    org.testcontainers: WARN
+    com.github.dockerjava: WARN

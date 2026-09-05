@@ -1,0 +1,8 @@
+# The RSA signing keypair. Never in the build context, never in an image, never
+# in a registry — the container gets it from JWT_PRIVATE_KEY at runtime.
+keys/
+
+target/
+.git/
+.idea/
+*.iml
