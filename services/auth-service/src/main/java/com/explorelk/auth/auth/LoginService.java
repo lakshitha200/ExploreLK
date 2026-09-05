@@ -5,6 +5,7 @@ import com.explorelk.auth.auth.dto.TokenResponse;
 import com.explorelk.auth.common.ErrorCode;
 import com.explorelk.auth.common.LogSafe;
 import com.explorelk.auth.common.exception.AppException;
+import com.explorelk.auth.ratelimit.LoginAttemptService;
 import com.explorelk.auth.token.JwtService;
 import com.explorelk.auth.token.RefreshTokenService;
 import com.explorelk.auth.user.User;
@@ -50,6 +51,7 @@ public class LoginService {
     private final PasswordEncoder passwordEncoder;
     private final JwtService jwtService;
     private final RefreshTokenService refreshTokenService;
+    private final LoginAttemptService loginAttempts;
 
     @Transactional
     public TokenResponse login(LoginRequest request, String userAgent, String ip) {
@@ -61,12 +63,24 @@ public class LoginService {
         boolean passwordMatches = verifyPassword(request.password(), found.orElse(null));
 
         if (found.isEmpty() || !passwordMatches) {
+            // Counted only for addresses that exist. There is no row to count
+            // against otherwise, and creating one would turn login into a way of
+            // filling the users table.
+            found.ifPresent(loginAttempts::recordFailure);
+
             log.info("Failed login for {}", LogSafe.email(email));
             throw new AppException(ErrorCode.INVALID_CREDENTIALS, "Bad credentials for " + LogSafe.email(email));
         }
 
         User user = found.get();
+
+        // Before the state checks, so a locked account hears "locked" rather than
+        // having a correct password quietly accepted while it is locked out.
         assertMayAuthenticate(user);
+
+        // The password was right and the account may authenticate, so whatever
+        // failures came before were somebody typing badly, not an attack.
+        loginAttempts.recordSuccess(user);
 
         return issueTokens(user, userAgent, ip);
     }
@@ -127,6 +141,12 @@ public class LoginService {
      * should hear "suspended", not "verify your email".
      */
     private void assertMayAuthenticate(User user) {
+        // Lockout first. It is the only one of these that an attacker can cause
+        // on somebody else's account, so it must not be masked by a state the
+        // account owner already knows about.
+        if (user.isLocked()) {
+            throw new AppException(ErrorCode.ACCOUNT_LOCKED, "Locked user " + user.getId());
+        }
         if (user.getStatus() == UserStatus.SUSPENDED) {
             throw new AppException(ErrorCode.ACCOUNT_SUSPENDED, "Suspended user " + user.getId());
         }
@@ -135,9 +155,6 @@ public class LoginService {
         }
         if (user.getStatus() == UserStatus.PENDING_VERIFICATION || !user.isEmailVerified()) {
             throw new AppException(ErrorCode.EMAIL_NOT_VERIFIED, "Unverified user " + user.getId());
-        }
-        if (user.isLocked()) {
-            throw new AppException(ErrorCode.ACCOUNT_LOCKED, "Locked user " + user.getId());
         }
     }
 

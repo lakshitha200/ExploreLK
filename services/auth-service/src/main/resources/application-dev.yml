@@ -22,6 +22,31 @@ spring:
       hibernate:
         highlight_sql: true
 
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+
+explorelk:
+  super-admin:
+    # A known development account, so a fresh clone has someone who can reach the
+    # admin endpoints. It still starts with must_change_password set, and these
+    # values exist nowhere but this dev-only file.
+    email: ${SUPER_ADMIN_EMAIL:superadmin@explorelk.local}
+    password: ${SUPER_ADMIN_PASSWORD:ChangeMe_123}
+
+# http://localhost:8081/swagger-ui.html — generated from the controllers, so it
+# cannot drift from them. SecurityConfig opens these paths only when api-docs is
+# enabled, which is only here.
+springdoc:
+  api-docs:
+    enabled: true
+    path: /v3/api-docs
+  swagger-ui:
+    enabled: true
+    path: /swagger-ui.html
+    tags-sorter: alpha
+    operations-sorter: method
+    display-request-duration: true
+
 management:
   endpoints:
     web:

@@ -19,7 +19,26 @@
 
     <properties>
         <java.version>17</java.version>
+        <springdoc.version>3.1.0</springdoc.version>
+        <testcontainers.version>1.21.4</testcontainers.version>
     </properties>
+
+    <!--
+        Spring Boot's parent does not manage Testcontainers versions, so the BOM
+        pins them here. Without it the module dependencies below fail at
+        POM-parse time with "version is missing", before any code is read.
+    -->
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.testcontainers</groupId>
+                <artifactId>testcontainers-bom</artifactId>
+                <version>${testcontainers.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
 
     <dependencies>
 
@@ -124,6 +143,36 @@
             <artifactId>spring-security-oauth2-jose</artifactId>
         </dependency>
 
+        <!--
+            Messaging. The STARTER, not spring-kafka on its own: Boot 4 moved
+            every auto-configuration into a per-technology module, exactly as it
+            did for Flyway above. With only spring-kafka the library is on the
+            classpath but nothing configures it, and the app dies at startup on
+            "No qualifying bean of type KafkaTemplate<String, String>" — which
+            reads as a generics problem and is really a missing module.
+
+            Kafka is not on the request path. A broker outage costs nothing here:
+            the outbox keeps accepting events into Postgres and drains when Kafka
+            returns.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-kafka</artifactId>
+        </dependency>
+
+        <!--
+            API documentation, generated from the controllers so it cannot drift
+            from them. Switched OFF by default in application.yml and enabled
+            only by the dev profile: a public schema of the whole auth surface is
+            free reconnaissance. springdoc 3.x is the Spring Boot 4 line — the
+            2.x releases are built against Boot 3 and fail at startup here.
+        -->
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+            <version>${springdoc.version}</version>
+        </dependency>
+
         <!-- Health / metrics -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -143,11 +192,85 @@
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
         </dependency>
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!--
+            MockMvc. Boot 4 split the web test slices out of
+            spring-boot-starter-test into per-stack modules, so
+            @AutoConfigureMockMvc is neither on the classpath nor in its old
+            package. Without this the test sources do not compile at all.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-webmvc-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!--
+            Integration tests run against real Postgres, Redis and (for one test)
+            Kafka, never an in-memory substitute. H2 has no partial index, no
+            JSONB and no functional unique index, so a suite built on it would
+            pass while the three things this service depends on went untested.
+
+            Testcontainers must be 1.21+: Docker Desktop on Windows answers the
+            legacy docker_engine pipe with an empty 400, and only 1.21 falls back
+            to reading the active docker context.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-testcontainers</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>kafka</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- Polling for an event that arrives on a scheduler, without Thread.sleep. -->
+        <dependency>
+            <groupId>org.awaitility</groupId>
+            <artifactId>awaitility</artifactId>
+            <scope>test</scope>
+        </dependency>
 
     </dependencies>
 
     <build>
         <plugins>
+            <!--
+                Unit tests run in `mvn test`; the *IT integration tests run in
+                `mvn verify`, through failsafe. The split matters because the IT
+                suite needs Docker: a developer without it running can still get
+                fast feedback from the unit tests instead of a wall of container
+                errors.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>

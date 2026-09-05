@@ -57,6 +57,29 @@ spring:
           timeout: 5000
           writetimeout: 5000
 
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      # The payload is already JSON by the time it leaves the outbox table, so it
+      # travels as a string. Serializing a Java object here instead would put the
+      # wire format in two places and let them drift.
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      # acks=all: not acknowledged until every in-sync replica has the record. The
+      # outbox row is marked published on that acknowledgement, so anything weaker
+      # would let a row be marked done for a record a broker failure then loses.
+      acks: all
+      properties:
+        enable.idempotence: true
+        # Bounded so a wedged broker fails the send instead of holding the
+        # publisher's row locks open indefinitely.
+        max.block.ms: 5000
+        delivery.timeout.ms: 10000
+        request.timeout.ms: 5000
+    listener:
+      # This service publishes and never consumes. Nothing here subscribes.
+      auto-startup: false
+
   jackson:
     default-property-inclusion: non_null
     deserialization:
@@ -75,6 +98,44 @@ explorelk:
     refresh-token-ttl: ${JWT_REFRESH_TTL:30d}
     private-key: ${JWT_PRIVATE_KEY:file:./keys/private.pem}
     public-key: ${JWT_PUBLIC_KEY:file:./keys/public.pem}
+
+  events:
+    # One topic for all seven event types. A consumer subscribes once and filters
+    # on eventType, rather than tracking seven topic names that grow every time
+    # this service learns a new verb.
+    auth-events: ${KAFKA_AUTH_TOPIC:explorelk.auth.events}
+    # Keyed by user id, so one user's events stay ordered — the only ordering
+    # that means anything here.
+    partitions: 3
+    # One replica is a development setting. Production must override it: with a
+    # single replica, losing a broker loses the partition.
+    replicas: 1
+    poll-interval-ms: 1000
+    # Turn publishing off to run the service with no broker present.
+    enabled: ${EVENTS_ENABLED:true}
+
+  rate-limit:
+    enabled: ${RATE_LIMIT_ENABLED:true}
+    # Per IP, across every unauthenticated auth endpoint. Generous enough that a
+    # person retrying a password never sees it, tight enough that a script does.
+    login-per-ip: 10
+    login-window: 60s
+    # Per ACCOUNT, and this one lives in Postgres rather than Redis — see
+    # LoginAttemptService for why. Five failures, then fifteen minutes.
+    max-failed-logins: 5
+    lock-duration: 15m
+    # "Forgot password" and "resend verification" both send mail to an address
+    # somebody else supplied, which makes them a mail cannon without a limit.
+    email-requests: 3
+    email-window: 15m
+
+  super-admin:
+    # The first administrator, created once on an empty database. Outside dev a
+    # missing value stops startup rather than inventing a default — see
+    # SuperAdminBootstrap.
+    email: ${SUPER_ADMIN_EMAIL:}
+    password: ${SUPER_ADMIN_PASSWORD:}
+    full-name: ${SUPER_ADMIN_NAME:ExploreLK Super Admin}
 
   cors:
     # Explicit per environment. Never '*' on an auth service.
@@ -108,6 +169,15 @@ management:
   info:
     env:
       enabled: true
+
+# ── API documentation ─────────────────────────────────────────────────────────
+# Off everywhere by default; application-dev.yml turns it on. A public schema of
+# the whole authentication surface is free reconnaissance.
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false
 
 info:
   app:

@@ -5,6 +5,8 @@ import com.explorelk.auth.auth.dto.RegisterRequest;
 import com.explorelk.auth.common.ErrorCode;
 import com.explorelk.auth.common.LogSafe;
 import com.explorelk.auth.common.exception.AppException;
+import com.explorelk.auth.outbox.AuthEventType;
+import com.explorelk.auth.outbox.OutboxWriter;
 import com.explorelk.auth.user.User;
 import com.explorelk.auth.user.UserRepository;
 import com.explorelk.auth.user.UserStatus;
@@ -48,6 +50,7 @@ public class RegistrationService {
     private final PasswordEncoder passwordEncoder;
     private final VerificationService verificationService;
     private final ApplicationEventPublisher events;
+    private final OutboxWriter outboxWriter;
 
     @Transactional
     public MessageResponse register(RegisterRequest request) {
@@ -90,6 +93,19 @@ public class RegistrationService {
                 .build());
 
         String rawToken = verificationService.issueVerificationToken(user);
+
+        // In the same transaction as the INSERT above, which is the entire point:
+        // a crash between the two cannot produce a registered user nobody was
+        // ever told about. The token travels because the Notification Service
+        // cannot build the verification link without it.
+        outboxWriter.write(AuthEventType.USER_REGISTERED, user,
+                java.util.Map.of("verificationToken", rawToken));
+
+        // A provider signs up like anyone else but cannot sell until an admin
+        // approves them, so somebody has to be told there is a queue.
+        if (user.getRole() == com.explorelk.auth.user.UserRole.PROVIDER) {
+            outboxWriter.write(AuthEventType.PROVIDER_REGISTERED, user);
+        }
 
         // Sent after this transaction commits — see RegistrationEmailListener.
         events.publishEvent(new UserRegistered(user.getId(), rawToken));

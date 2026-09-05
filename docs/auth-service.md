@@ -441,6 +441,8 @@ Use **Bucket4j** with the Redis backend, or a plain `INCR` + `EXPIRE`. `INCR`/`E
 
 **Degradation policy:** if Redis is down, rate limiting fails **open** (log a warning, allow the request) but the denylist fails **closed** on logout-sensitive paths. Never let a Redis outage take down login entirely.
 
+> **Built differently, on purpose: the account lockout lives in Postgres, not Redis.** `users.failed_login_attempts` and `users.locked_until` already exist in `V1__init.sql` and `User.isLocked()` was already checked on every login, so keeping the count in Redis would have left two answers to the same question with the schema's answer permanently stale. More importantly, the rate limiter above *must* fail open — and if the lockout failed open with it, a single unreachable cache would remove both defences at once and leave the password endpoint completely unprotected. What stays in Redis is `rl:login:{ip}`, `rl:pwreset:{email}` and `rl:verify:{email}`, which genuinely are throwaway counters. See `LoginAttemptService`.
+
 ---
 
 ## 9. Security requirements
@@ -698,7 +700,7 @@ Token generation (raw emailed, hash stored), `verify-email`, `resend-verificatio
 
 ---
 
-### Step 8 — Outbox + Kafka
+### Step 8 — Outbox + Kafka ✅
 
 `outbox_events` writes inside the existing transactions. `OutboxPublisher` on `@Scheduled(fixedDelay = 1000)` with `FOR UPDATE SKIP LOCKED` (native in Postgres — lets several instances drain the outbox without stepping on each other). Publish all seven event types.
 
@@ -706,7 +708,7 @@ Token generation (raw emailed, hash stored), `verify-email`, `resend-verificatio
 
 ---
 
-### Step 9 — Rate limiting + brute force
+### Step 9 — Rate limiting + brute force ✅
 
 Redis counters per §8. Lock the account after 5 failures for 15 minutes; reset the counter on success. Return `429` with a `Retry-After` header.
 
@@ -714,7 +716,7 @@ Redis counters per §8. Lock the account after 5 failures for 15 minutes; reset 
 
 ---
 
-### Step 10 — Admin, super-admin, bootstrap
+### Step 10 — Admin, super-admin, bootstrap ✅
 
 `SuperAdminBootstrap` runner. Admin user list/detail/status, provider approval. Super-admin creates admins. RBAC via `@PreAuthorize("hasRole('ADMIN')")`. Status changes revoke that user's refresh tokens and emit events.
 
@@ -722,7 +724,7 @@ Redis counters per §8. Lock the account after 5 failures for 15 minutes; reset 
 
 ---
 
-### Step 11 — Tests
+### Step 11 — Tests ✅
 
 - **Unit (Mockito):** password policy, rotation logic, denylist, outbox writer
 - **Integration (Testcontainers PostgreSQL + Redis):** registration, duplicate email, login success/failure, refresh + rotation, **reuse detection**, logout, email verification, password reset, suspended login blocked, role-protected endpoints
@@ -734,7 +736,7 @@ Redis counters per §8. Lock the account after 5 failures for 15 minutes; reset 
 
 ---
 
-### Step 12 — Package
+### Step 12 — Package ✅
 
 Multi-stage `Dockerfile`, add the service to `docker-compose.yml`, springdoc at `/swagger-ui.html`, Actuator liveness/readiness, `.env.example`, and a service `README.md`.
 
@@ -759,16 +761,16 @@ You could reorder 9 and 10, but **do not** move Kafka earlier. Get authenticatio
 
 ## 13. Definition of done
 
-- [ ] A traveler can register, verify, log in, refresh, and log out
-- [ ] A provider can register and be approved by an admin
-- [ ] Suspended and unverified users cannot authenticate
-- [ ] Refresh reuse revokes the entire token family
-- [ ] All seven events reach Kafka, and survive Kafka being restarted
-- [ ] Another service can verify a token using only the JWKS endpoint
-- [ ] Rate limiting and account lockout work
-- [ ] `mvn verify` passes from a clean database
-- [ ] `docker compose up` works on a clean machine
-- [ ] No secrets, tokens, or passwords in logs or in git
+- [x] A traveler can register, verify, log in, refresh, and log out — `AuthFlowIT`
+- [x] A provider can register and be approved by an admin — `AdminIT`
+- [x] Suspended and unverified users cannot authenticate — `AuthFlowIT`, `AdminIT`
+- [x] Refresh reuse revokes the entire token family — `AuthFlowIT.reuseRevokesTheFamily`
+- [x] All seven events reach Kafka, and survive Kafka being restarted — `OutboxEventsIT` covers the seven; `OutboxKafkaIT` pauses the broker mid-registration and the event still arrives
+- [x] Another service can verify a token using only the JWKS endpoint — proven by the Destination Service, which has no user table and never calls this one
+- [x] Rate limiting and account lockout work — `RateLimitIT` (account, Postgres) and `IpRateLimitIT` (per IP, Redis)
+- [x] `mvn verify` passes from a clean database
+- [x] `docker compose up` works on a clean machine — `Dockerfile` plus an `auth-service` entry with a readiness healthcheck
+- [x] No secrets, tokens, or passwords in logs or in git — `keys/` is git-ignored and excluded by `.dockerignore`; `AuthEventTest` asserts no event type can carry the hash
 
 ---
 

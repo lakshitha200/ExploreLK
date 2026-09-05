@@ -105,6 +105,66 @@ services:
       - "1025:1025"
       - "8025:8025"
 
+  # ── Auth Service ──────────────────────────────────────────────
+  # Identity for the whole platform. The only service that signs tokens.
+  # http://localhost:8081 — /swagger-ui.html in the dev profile.
+  auth-service:
+    build:
+      context: ./services/auth-service
+      dockerfile: Dockerfile
+    image: explorelk/auth-service:latest
+    container_name: explorelk-auth-service
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      mailhog:
+        condition: service_started
+    ports:
+      - "8081:8081"
+    environment:
+      SPRING_PROFILES_ACTIVE: ${AUTH_PROFILE:-dev}
+
+      # Service names and INTERNAL ports: inside a container localhost is the
+      # container itself, and the published 5433/6379 are for the host.
+      AUTH_DB_URL: jdbc:postgresql://postgres:5432/${AUTH_DB_NAME:-explorelk_auth}
+      AUTH_DB_USERNAME: ${POSTGRES_USER:-explorelk}
+      AUTH_DB_PASSWORD: ${POSTGRES_PASSWORD:-explorelk}
+
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+
+      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      EVENTS_ENABLED: ${EVENTS_ENABLED:-true}
+
+      MAIL_HOST: mailhog
+      MAIL_PORT: 1025
+
+      JWT_ISSUER: ${JWT_ISSUER:-explorelk-auth}
+      # Read from the mounted volume below, never baked into the image.
+      JWT_PRIVATE_KEY: file:/run/keys/private.pem
+      JWT_PUBLIC_KEY: file:/run/keys/public.pem
+
+      SUPER_ADMIN_EMAIL: ${SUPER_ADMIN_EMAIL:-superadmin@explorelk.local}
+      SUPER_ADMIN_PASSWORD: ${SUPER_ADMIN_PASSWORD:-ChangeMe_123}
+
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:5173}
+    volumes:
+      # Read-only, and out of the image entirely. A signing key baked into an
+      # image is a signing key in every registry that image reaches. In
+      # production this is a secret mount, not a bind from the working tree.
+      - ./services/auth-service/keys:/run/keys:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8081/actuator/health/readiness || exit 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 90s
+
   # ── Destination Service ───────────────────────────────────────
   # The catalog: destinations, attractions, categories, proximity search.
   # http://localhost:8082 — /swagger-ui.html in the dev profile.
@@ -122,6 +182,11 @@ services:
         condition: service_healthy
       kafka:
         condition: service_healthy
+      # Started, not healthy. Destination only needs auth to be reachable the
+      # first time an admin presents a token, and blocking the catalog's startup
+      # on another service's health is the coupling this architecture avoids.
+      auth-service:
+        condition: service_started
     ports:
       - "8082:8082"
     environment:
@@ -141,11 +206,10 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka:19092
       EVENTS_ENABLED: ${EVENTS_ENABLED:-true}
 
-      # The Auth Service is not in this file yet, so the default reaches back to
-      # one running on the host. Change it to http://auth-service:8081/... the
-      # moment auth is containerised alongside this. Public catalog reads work
-      # either way; only the admin endpoints need a verifiable token.
-      AUTH_JWKS_URI: ${AUTH_JWKS_URI_INTERNAL:-http://host.docker.internal:8081/.well-known/jwks.json}
+      # By service name, now that auth is in this file. The key is fetched once
+      # and cached, so destination keeps verifying tokens even if auth restarts
+      # afterwards — that independence is the whole point of the JWKS design.
+      AUTH_JWKS_URI: ${AUTH_JWKS_URI_INTERNAL:-http://auth-service:8081/.well-known/jwks.json}
       JWT_ISSUER: ${JWT_ISSUER:-explorelk-auth}
 
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:5173}

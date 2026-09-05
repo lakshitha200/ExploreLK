@@ -3,6 +3,10 @@ package com.explorelk.auth.verification;
 import com.explorelk.auth.common.ErrorCode;
 import com.explorelk.auth.common.LogSafe;
 import com.explorelk.auth.common.exception.AppException;
+import com.explorelk.auth.outbox.AuthEventType;
+import com.explorelk.auth.outbox.OutboxWriter;
+import com.explorelk.auth.ratelimit.RateLimitProperties;
+import com.explorelk.auth.ratelimit.RateLimitService;
 import com.explorelk.auth.token.RefreshTokenService;
 import com.explorelk.auth.token.TokenHasher;
 import com.explorelk.auth.user.User;
@@ -50,6 +54,9 @@ public class VerificationService {
     private final RefreshTokenService refreshTokenService;
     private final PasswordEncoder passwordEncoder;
     private final EmailSender emailSender;
+    private final OutboxWriter outboxWriter;
+    private final RateLimitService rateLimitService;
+    private final RateLimitProperties rateLimitProperties;
 
     // ── Email verification ───────────────────────────────────────────────────
 
@@ -99,6 +106,8 @@ public class VerificationService {
         token.setUsedAt(Instant.now());
         verificationTokens.save(token);
 
+        outboxWriter.write(AuthEventType.USER_EMAIL_VERIFIED, user);
+
         log.info("Email verified for user {}", user.getId());
     }
 
@@ -121,6 +130,13 @@ public class VerificationService {
         User user = found.get();
         if (user.isEmailVerified()) {
             log.info("Resend requested for already-verified user {}", user.getId());
+            return;
+        }
+        if (throttled("rl:verify:" + email)) {
+            // Silent, like every other branch here. Saying "you are sending too
+            // many" confirms the address exists, which is exactly what the
+            // silence above is protecting.
+            log.info("Resend throttled for user {}", user.getId());
             return;
         }
 
@@ -150,6 +166,12 @@ public class VerificationService {
         // A disabled account must not be recoverable by its former owner.
         if (user.getStatus() == UserStatus.DISABLED) {
             log.info("Password reset requested for disabled user {}", user.getId());
+            return;
+        }
+        if (throttled("rl:pwreset:" + email)) {
+            // Silent again. This endpoint answers 202 for everything, so the
+            // throttle must not be the one branch that behaves differently.
+            log.info("Password reset throttled for user {}", user.getId());
             return;
         }
 
@@ -231,5 +253,23 @@ public class VerificationService {
 
     private static String normalise(String email) {
         return email == null ? "" : email.trim().toLowerCase(Locale.ROOT);
+    }
+
+    /**
+     * Both email-triggered endpoints share one rule: three requests per address
+     * per fifteen minutes.
+     *
+     * <p>Without it, "forgot password" is a free mail cannon — anybody can post
+     * one address a thousand times and the inbox, not this service, is what
+     * breaks. The per-IP filter does not cover it, because the interesting
+     * attack comes from many addresses at once.
+     */
+    private boolean throttled(String key) {
+        if (!rateLimitProperties.enabled()) {
+            return false;
+        }
+        return !rateLimitService.check(key,
+                rateLimitProperties.emailRequests(),
+                rateLimitProperties.emailWindow()).allowed();
     }
 }

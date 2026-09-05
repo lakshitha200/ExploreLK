@@ -10,6 +10,7 @@ import com.nimbusds.jose.jwk.RSAKey;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
@@ -58,7 +59,10 @@ public class SecurityConfig {
     private final ObjectMapper objectMapper;
 
     @Bean
-    public SecurityFilterChain filterChain(HttpSecurity http, JwtDecoder jwtDecoder) throws Exception {
+    public SecurityFilterChain filterChain(HttpSecurity http,
+                                          JwtDecoder jwtDecoder,
+                                          @Value("${springdoc.api-docs.enabled:false}") boolean apiDocsEnabled)
+            throws Exception {
         http
                 // No cookies, no sessions, so there is no CSRF vector to protect.
                 // (Were tokens ever moved into cookies, this must come back on.)
@@ -72,7 +76,18 @@ public class SecurityConfig {
                 // a session, or one leaked JSESSIONID would outlive token expiry.
                 .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
 
-                .authorizeHttpRequests(auth -> auth
+                .authorizeHttpRequests(auth -> {
+                    // Swagger, and only where it exists. springdoc is disabled
+                    // outside dev, so these paths 404 there anyway — but opening
+                    // them unconditionally would silently publish a schema of
+                    // every admin endpoint the day somebody enables the property
+                    // in another profile.
+                    if (apiDocsEnabled) {
+                        auth.requestMatchers("/swagger-ui.html", "/swagger-ui/**",
+                                "/v3/api-docs", "/v3/api-docs/**").permitAll();
+                    }
+
+                    auth
                         // Getting a token cannot itself require a token.
                         .requestMatchers("/api/v1/auth/register",
                                 "/api/v1/auth/login",
@@ -91,9 +106,15 @@ public class SecurityConfig {
 
                         .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
 
-                        // Role checks live on the endpoints themselves via
-                        // @PreAuthorize (Step 10); everything else needs a valid token.
-                        .anyRequest().authenticated())
+                        // Path-scoped as well as annotated. @PreAuthorize on the
+                        // controllers says the same thing, and saying it twice
+                        // means neither a forgotten annotation on a new method
+                        // nor a typo here can quietly open an admin endpoint.
+                        .requestMatchers("/api/v1/super-admin/**").hasRole("SUPER_ADMIN")
+                        .requestMatchers("/api/v1/admin/**").hasAnyRole("ADMIN", "SUPER_ADMIN")
+
+                        .anyRequest().authenticated();
+                })
 
                 .oauth2ResourceServer(oauth -> oauth
                         .jwt(jwt -> jwt

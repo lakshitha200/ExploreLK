@@ -3,8 +3,6 @@ package com.explorelk.auth.outbox;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EntityListeners;
-import jakarta.persistence.GeneratedValue;
-import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
 import lombok.AllArgsConstructor;
@@ -39,7 +37,8 @@ import java.util.UUID;
  * <p>Delivery is at-least-once, so consumers must be idempotent — that is what
  * {@link #id} is for once it travels as the event id.
  *
- * <p>Wired up in Step 8; the table exists from Step 2 so the schema is complete.
+ * <p>Written by {@link OutboxWriter} inside the caller's transaction and
+ * drained by {@link OutboxPublisher}.
  */
 @Entity
 @Table(name = "outbox_events")
@@ -51,9 +50,16 @@ import java.util.UUID;
 @Builder
 public class OutboxEvent {
 
-    /** Travels to Kafka as the event id; consumers dedupe on it. */
+    /**
+     * Travels to Kafka as the event id; consumers dedupe on it.
+     *
+     * <p><strong>Assigned, not generated.</strong> {@code @GeneratedValue} would
+     * have Hibernate mint the id at persist time — after {@link OutboxWriter}
+     * has already serialized it into the payload, so the row id and the
+     * {@code eventId} inside the JSON would be two different values and an
+     * operator holding a Kafka message could not find the row that produced it.
+     */
     @Id
-    @GeneratedValue(strategy = GenerationType.UUID)
     @Column(name = "id", updatable = false, nullable = false)
     private UUID id;
 

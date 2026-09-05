@@ -1,7 +1,9 @@
 package com.explorelk.auth;
 
 import org.springframework.boot.SpringApplication;
+import com.explorelk.auth.ratelimit.RateLimitProperties;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.data.jpa.repository.config.EnableJpaAuditing;
 
 /**
@@ -13,6 +15,10 @@ import org.springframework.data.jpa.repository.config.EnableJpaAuditing;
  */
 @SpringBootApplication
 @EnableJpaAuditing
+// Rate-limit settings are read by a filter, a service and the verification
+// flow, none of which is a @Configuration class of its own — so they are bound
+// here rather than hidden inside whichever one happened to be written first.
+@EnableConfigurationProperties(RateLimitProperties.class)
 public class AuthApplication {
 
     public static void main(String[] args) {
