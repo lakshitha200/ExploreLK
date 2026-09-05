@@ -1,0 +1,34 @@
+# Test profile. The downstream addresses, the JWKS URL and Redis are all injected
+# at runtime by @DynamicPropertySource — nothing here points at a real service.
+explorelk:
+  rate-limit:
+    # ON, and deliberately generous. The limiter is part of what the suite tests
+    # (see RateLimitIT, which tightens it for itself), but every request in every
+    # other class arrives from 127.0.0.1 and shares one bucket — a production-sized
+    # limit would throttle the routing tests and fail them for the wrong reason.
+    enabled: true
+    requests-per-window: 500
+    window: 60s
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      auth-service:
+        # Small windows so a test can trip the breaker in a few calls instead of
+        # the dozens production is tuned for.
+        sliding-window-size: 4
+        minimum-number-of-calls: 2
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 2s
+      destination-service:
+        sliding-window-size: 4
+        minimum-number-of-calls: 2
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 2s
+
+logging:
+  level:
+    root: WARN
+    com.explorelk.gateway: INFO
+    org.testcontainers: WARN
+    com.github.dockerjava: WARN

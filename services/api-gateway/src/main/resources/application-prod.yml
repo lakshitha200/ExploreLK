@@ -1,0 +1,31 @@
+# Production. Every address comes from the environment — no defaults on purpose,
+# so a missing value fails at startup rather than silently proxying to localhost,
+# where nothing is listening and every request becomes a 503.
+explorelk:
+  gateway:
+    auth-service-uri: ${AUTH_SERVICE_URI}
+    destination-service-uri: ${DESTINATION_SERVICE_URI}
+  auth:
+    jwks-uri: ${AUTH_JWKS_URI}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # No /actuator/gateway in production: it lists every route and the
+        # address of every service behind this one.
+        include: health,info
+  endpoint:
+    health:
+      show-details: never
+
+server:
+  error:
+    include-stacktrace: never
+    include-message: never
+    include-binding-errors: never
+
+logging:
+  level:
+    root: WARN
+    com.explorelk.gateway: INFO

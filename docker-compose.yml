@@ -229,6 +229,52 @@ services:
       retries: 5
       start_period: 90s
 
+  # ── API Gateway ───────────────────────────────────────────────
+  # The single address the outside world uses: http://localhost:8080.
+  # Everything else is reachable only inside this network.
+  api-gateway:
+    build:
+      context: ./services/api-gateway
+      dockerfile: Dockerfile
+    image: explorelk/api-gateway:latest
+    container_name: explorelk-api-gateway
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+      # Started, not healthy. The gateway must come up and answer 503 for a
+      # service that is still starting — waiting for both would mean one slow
+      # service delays the address every client is pointed at.
+      auth-service:
+        condition: service_started
+      destination-service:
+        condition: service_started
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: ${GATEWAY_PROFILE:-dev}
+
+      # Service names and INTERNAL ports. The published 8081/8082 are for the
+      # host; inside the network these are the addresses that exist.
+      AUTH_SERVICE_URI: http://auth-service:8081
+      DESTINATION_SERVICE_URI: http://destination-service:8082
+      # The Auth Service directly, never back through this gateway's own route:
+      # a service that proxies to itself to start up is a circular dependency.
+      AUTH_JWKS_URI: http://auth-service:8081/.well-known/jwks.json
+      JWT_ISSUER: ${JWT_ISSUER:-explorelk-auth}
+
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+
+      RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:5173}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/actuator/health/readiness || exit 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 60s
+
 volumes:
   postgres-data:
   kafka-data:

@@ -132,3 +132,14 @@ These are the services we currently have for the MVP:
 | 6 | Booking Service | Handle experience reservations | Bookings, capacity reservation, cancellation, booking status, idempotency |
 | 7 | Notification Service | Notify users about important events | Booking confirmations/cancellations and stored user notifications |
 | + | API Gateway | Entry point to the whole platform | Routing, authentication checks, rate limiting, request handling |
+
+### Built so far
+
+| Service | Port | State |
+| --- | --- | --- |
+| [Auth](auth-service.md) | 8081 | Done — all 12 steps |
+| [Destination](destination-service.md) | 8082 | Done — all 12 steps |
+| [API Gateway](api-gateway.md) | **8080** | Done — the one address clients use |
+
+Everything else is not started. With the gateway up, a client needs exactly one
+address: `http://localhost:8080`.

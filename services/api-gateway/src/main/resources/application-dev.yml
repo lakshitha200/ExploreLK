@@ -1,0 +1,23 @@
+# Local development. Defaults match docker-compose.yml so the gateway runs with
+# no environment variables set at all.
+explorelk:
+  gateway:
+    auth-service-uri: ${AUTH_SERVICE_URI:http://localhost:8081}
+    destination-service-uri: ${DESTINATION_SERVICE_URI:http://localhost:8082}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,gateway,metrics,env,configprops,beans
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  level:
+    com.explorelk.gateway: DEBUG
+    # Every proxied request, with the route that matched it. The first question
+    # when a call goes to the wrong service is "which route matched", and this
+    # answers it without a debugger.
+    org.springframework.cloud.gateway: DEBUG

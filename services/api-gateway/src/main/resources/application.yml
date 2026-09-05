@@ -1,0 +1,149 @@
+spring:
+  application:
+    name: api-gateway
+
+  profiles:
+    default: dev
+
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      # Bounded on purpose. The rate limiter fails open, so a Redis that has
+      # stopped answering must fail FAST — an unbounded wait would add its
+      # timeout to every request on the platform, which is the one thing a
+      # gateway may never do.
+      timeout: 300ms
+      connect-timeout: 300ms
+
+  cloud:
+    gateway:
+      server:
+        webmvc:
+          # The proxy's own HTTP client. Both are far shorter than a browser's
+          # patience: a request that will fail should fail while the user is
+          # still looking at the screen, and a connection that has not opened in
+          # two seconds is not going to.
+          http-client:
+            connect-timeout: 2s
+            read-timeout: 15s
+
+server:
+  port: 8080
+  error:
+    include-stacktrace: never
+    include-message: never
+  shutdown: graceful
+  # A gateway holds one inbound connection per in-flight request AND one
+  # outbound. The default 200 threads is the real concurrency ceiling here, and
+  # naming it makes that visible rather than a surprise under load.
+  tomcat:
+    threads:
+      max: 200
+
+explorelk:
+  gateway:
+    # Service names, not localhost. Inside a container localhost is the
+    # container itself, and the published 8081/8082 ports are for the host —
+    # using them here is the classic "connection refused" from a correct config.
+    auth-service-uri: ${AUTH_SERVICE_URI:http://localhost:8081}
+    destination-service-uri: ${DESTINATION_SERVICE_URI:http://localhost:8082}
+
+  auth:
+    # The Auth Service directly, never this gateway's own /.well-known route.
+    # A service that proxies to itself to start up is a circular dependency.
+    jwks-uri: ${AUTH_JWKS_URI:http://localhost:8081/.well-known/jwks.json}
+    issuer: ${JWT_ISSUER:explorelk-auth}
+    jwks-cache-ttl: 15m
+    # A warm key stays usable while auth restarts. Signing keys do not rotate on
+    # the hour, and rejecting valid tokens because auth is redeploying is exactly
+    # the coupling the JWKS design removes.
+    jwks-outage-ttl: 24h
+    jwks-refresh-timeout: 15s
+
+  rate-limit:
+    enabled: ${RATE_LIMIT_ENABLED:true}
+    # Per address, across everything. Loose enough that a traveler paging through
+    # the catalog never notices, tight enough that a script does.
+    requests-per-window: 300
+    window: 60s
+
+  cors:
+    # One list for the whole platform — the browser only ever talks to :8080.
+    # Explicit per environment. Never a wildcard on the door to an admin API.
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000,http://localhost:5173}
+
+resilience4j:
+  circuitbreaker:
+    configs:
+      default:
+        # Percentage-based over a rolling window of calls. Ten failures in a row
+        # from a cold start would otherwise be needed to trip a count-based one.
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 20
+        minimum-number-of-calls: 10
+        failure-rate-threshold: 50
+        # Long enough that a restarting service is actually back, short enough
+        # that nobody notices a stale outage.
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: true
+    instances:
+      # Named per service so they trip independently: a broken catalog must not
+      # stop anyone logging in.
+      auth-service:
+        base-config: default
+      destination-service:
+        base-config: default
+
+  timelimiter:
+    configs:
+      default:
+        # Below the HTTP read timeout above, so a slow call is cut by the circuit
+        # breaker — and counted as a failure — rather than by the socket, which
+        # would not count and so would never trip anything.
+        timeout-duration: 10s
+    instances:
+      auth-service:
+        base-config: default
+      destination-service:
+        base-config: default
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,gateway
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never
+      group:
+        # Redis is deliberately NOT here. The rate limiter fails open, so the
+        # gateway routes every request correctly with the cache down — taking it
+        # out of the load balancer for that would be an outage caused by the
+        # thing that exists to prevent one.
+        #
+        # Neither are the downstream services: a gateway that reports itself
+        # unhealthy because the catalog is down would be restarted by an
+        # orchestrator that cannot fix the catalog, while auth — which is fine —
+        # becomes unreachable too. The circuit breaker handles that case.
+        readiness:
+          include: readinessState
+  info:
+    env:
+      enabled: true
+
+info:
+  app:
+    name: ExploreLK API Gateway
+    version: 0.0.1-SNAPSHOT
+
+logging:
+  pattern:
+    # The request id on every line, so one traveler's failed call can be pulled
+    # out of a busy log without grepping for a timestamp.
+    console: "%d{HH:mm:ss.SSS} %-5level [%X{requestId:-........}] %logger{36} - %msg%n"
+  level:
+    com.explorelk.gateway: INFO

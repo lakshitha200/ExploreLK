@@ -1,0 +1,208 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <!--
+            4.0.8, not the 4.1.1 the other two services run.
+
+            Spring Cloud is released as a train pinned to one Boot minor, and
+            2025.1.x is built and tested against Boot 4.0.x. Forcing 4.1.1 under
+            it is the combination nobody tests, and the failure mode is a
+            NoSuchMethodError at runtime rather than anything the compiler
+            catches. Nothing is shared between these services at build time —
+            each is its own Maven project and they only ever meet over HTTP — so
+            a different Boot patch line here costs nothing.
+
+            Raise this to 4.1.x when a Spring Cloud train targets it.
+        -->
+        <version>4.0.8</version>
+        <relativePath/>
+    </parent>
+
+    <groupId>com.explorelk</groupId>
+    <artifactId>api-gateway</artifactId>
+    <version>0.0.1-SNAPSHOT</version>
+    <name>api-gateway</name>
+    <description>ExploreLK API Gateway — the single entry point to the platform</description>
+
+    <properties>
+        <java.version>17</java.version>
+        <spring-cloud.version>2025.1.3</spring-cloud.version>
+        <testcontainers.version>1.21.4</testcontainers.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.springframework.cloud</groupId>
+                <artifactId>spring-cloud-dependencies</artifactId>
+                <version>${spring-cloud.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.testcontainers</groupId>
+                <artifactId>testcontainers-bom</artifactId>
+                <version>${testcontainers.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <dependencies>
+
+        <!--
+            The SERVLET gateway, not the reactive one.
+
+            Spring Cloud Gateway has two servers. The WebFlux one handles more
+            concurrent connections per thread and is the right answer at large
+            scale; the WebMVC one runs on the same servlet stack as auth-service
+            and destination-service, which means the security configuration, the
+            error handling and the tests here look exactly like theirs. For a
+            platform of two services on one machine, a shape every future
+            maintainer already recognises is worth more than throughput nobody
+            is close to needing — and switching later changes this module only.
+        -->
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-gateway-server-webmvc</artifactId>
+        </dependency>
+
+        <!--
+            Token verification at the edge. The gateway verifies the same way
+            every other service does — signature against the Auth Service's
+            published JWKS, locally, with no call per request.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
+        </dependency>
+
+        <!--
+            Rate limiting. The counters live in Redis rather than in memory
+            because a limit that resets on deploy, and that a second gateway
+            instance knows nothing about, is not a limit.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+
+        <!--
+            Circuit breaking and timeouts. A gateway without them turns one slow
+            downstream service into every request on the platform hanging: the
+            thread pool fills with calls waiting on the same dead host, and
+            endpoints that have nothing to do with it stop answering too.
+        -->
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-circuitbreaker-resilience4j</artifactId>
+        </dependency>
+
+        <!-- Health / metrics -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+
+        <!-- Boilerplate reduction -->
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <optional>true</optional>
+        </dependency>
+
+        <!-- Test -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!--
+            The gateway is tested against a real port, not MockMvc.
+
+            MockMvc never leaves the servlet container, and proxying is precisely
+            the part that does: what these tests must prove is that a request
+            arrived at a downstream service with the right path, the right
+            headers and the forged ones removed. That needs a real socket and a
+            real stub server on the other end.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-testcontainers</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!--
+            Nimbus is not declared here: spring-boot-starter-oauth2-resource-server
+            already brings it in through spring-security-oauth2-jose, and the tests
+            mint their tokens with the same library the gateway verifies them with.
+            Declaring it again without a version fails the build outright, because
+            Boot's BOM manages it only as a transitive of that starter.
+        -->
+
+        <dependency>
+            <groupId>org.awaitility</groupId>
+            <artifactId>awaitility</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!--
+                Unit tests in `mvn test`; the *IT integration tests in
+                `mvn verify`, through failsafe. The split matters because the IT
+                suite needs Docker for Redis.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <excludes>
+                        <exclude>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                        </exclude>
+                    </excludes>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+
+</project>
