@@ -1,6 +1,7 @@
 package com.explorelk.destination.destination;
 
 import com.explorelk.destination.category.CategoryService;
+import com.explorelk.destination.common.CatalogCache;
 import com.explorelk.destination.common.ErrorCode;
 import com.explorelk.destination.common.PageResponse;
 import com.explorelk.destination.common.Pagination;
@@ -11,6 +12,8 @@ import com.explorelk.destination.common.exception.ValidationException;
 import com.explorelk.destination.destination.dto.CreateDestinationRequest;
 import com.explorelk.destination.destination.dto.DestinationAdminResponse;
 import com.explorelk.destination.destination.dto.UpdateDestinationRequest;
+import com.explorelk.destination.outbox.CatalogEventType;
+import com.explorelk.destination.outbox.OutboxWriter;
 import com.explorelk.destination.search.DestinationQuery;
 import com.explorelk.destination.search.DestinationSearchSpecs;
 import com.explorelk.destination.search.DestinationSort;
@@ -44,6 +47,8 @@ public class DestinationAdminService {
 
     private final DestinationRepository destinationRepository;
     private final CategoryService categoryService;
+    private final CatalogCache catalogCache;
+    private final OutboxWriter outboxWriter;
 
     // ── Reads ────────────────────────────────────────────────────────────────
 
@@ -112,6 +117,12 @@ public class DestinationAdminService {
         requireCoordinatePair(destination);
 
         Destination saved = destinationRepository.save(destination);
+
+        // No cache eviction here on purpose. A new row lands as DRAFT, so it is
+        // absent from every public read a cache could be holding, and nothing
+        // cached can be wrong yet. There is no stale "not found" to clear either:
+        // getPublished throws rather than returning null, and exceptions are not
+        // cached.
         log.info("Destination created: {} ({})", saved.getSlug(), saved.getId());
 
         return DestinationAdminResponse.from(saved);
@@ -168,6 +179,14 @@ public class DestinationAdminService {
         // as it looks beforehand hands the admin a version number that is already
         // stale, so their next edit would be rejected as a conflict with themselves.
         Destination saved = destinationRepository.saveAndFlush(destination);
+        catalogCache.evictDestination(saved.getId(), saved.getSlug());
+
+        // Only published content is announced. Editing a draft tells consumers
+        // about a version of the world they have never seen, and a stream full of
+        // work in progress is what teaches consumers to stop listening.
+        if (saved.getStatus() == ContentStatus.PUBLISHED) {
+            outboxWriter.write(CatalogEventType.DESTINATION_UPDATED, saved);
+        }
         log.info("Destination updated: {} ({})", saved.getSlug(), saved.getId());
 
         return DestinationAdminResponse.from(saved);
@@ -208,6 +227,21 @@ public class DestinationAdminService {
         // Flushed for the same reason as update(): the response reports the version
         // this change produced, not the one it started from.
         Destination saved = destinationRepository.saveAndFlush(destination);
+
+        // The attraction list goes too. Publishing or archiving a destination
+        // changes whether its attractions are publicly visible at all, without
+        // touching a single attraction row — so a cached list of them is now
+        // wrong even though nothing in it changed.
+        catalogCache.evictAttractionsOf(saved.getId(), saved.getSlug());
+
+        // DRAFT and the unpublish transition emit nothing: going back to a draft
+        // is not news, it is the absence of news, and ARCHIVED already covers
+        // "stop showing this". Consumers that hold a copy act on the two below.
+        if (target == ContentStatus.PUBLISHED) {
+            outboxWriter.write(CatalogEventType.DESTINATION_PUBLISHED, saved);
+        } else if (target == ContentStatus.ARCHIVED) {
+            outboxWriter.write(CatalogEventType.DESTINATION_ARCHIVED, saved);
+        }
         log.info("Destination {} moved {} -> {}", saved.getSlug(), current, target);
 
         return DestinationAdminResponse.from(saved);
@@ -235,6 +269,12 @@ public class DestinationAdminService {
             return;
         }
         destination.setStatus(ContentStatus.ARCHIVED);
+        catalogCache.evictAttractionsOf(destination.getId(), destination.getSlug());
+
+        // Trip and Itinerary hold destination ids in their own databases with no
+        // foreign key to protect them. This event is the only way they learn that
+        // a plan now points at retired content.
+        outboxWriter.write(CatalogEventType.DESTINATION_ARCHIVED, destination);
         log.info("Destination archived: {} ({})", destination.getSlug(), id);
     }
 

@@ -40,6 +40,47 @@ spring:
     baseline-on-migrate: false
     validate-on-migrate: true
 
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      # Bounded on purpose. A Redis that has stopped answering must fail fast so
+      # the CacheErrorHandler can fall through to Postgres; an unbounded wait
+      # turns a cache outage into a catalog outage, which is the one thing the
+      # caching design is not allowed to do.
+      timeout: 500ms
+      connect-timeout: 500ms
+      lettuce:
+        pool:
+          enabled: true
+          max-active: 16
+          max-idle: 8
+          min-idle: 2
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      # The payload is already JSON by the time it leaves the outbox table, so it
+      # travels as a string. Serializing a Java object here instead would put the
+      # wire format in two places and let them drift.
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      # acks=all: the send is not acknowledged until every in-sync replica has the
+      # record. The outbox row is marked published on that acknowledgement, so a
+      # weaker setting would let a row be marked done for a record that a broker
+      # failure then loses -- silently, and with no way to detect it afterwards.
+      acks: all
+      properties:
+        enable.idempotence: true
+        # Bounded so a wedged broker fails the send instead of holding the
+        # publisher's row locks open indefinitely.
+        max.block.ms: 5000
+        delivery.timeout.ms: 10000
+        request.timeout.ms: 5000
+    listener:
+      # This service publishes and never consumes. Nothing here subscribes.
+      auto-startup: false
+
   jackson:
     default-property-inclusion: non_null
     deserialization:
@@ -66,6 +107,31 @@ explorelk:
     # requests aimed at the Auth Service.
     jwks-refresh-timeout: 15s
 
+  events:
+    # One topic for all six catalog events. A consumer subscribes once and
+    # filters on eventType, rather than tracking six topic names that grow every
+    # time the catalog learns a new verb.
+    catalog-events: ${KAFKA_CATALOG_TOPIC:explorelk.destination.events}
+    # Keyed by aggregate id, so ordering holds per destination or attraction --
+    # the only ordering that means anything here.
+    partitions: 3
+    # One replica is a development setting. Production must override it: with a
+    # single replica, losing a broker loses the partition.
+    replicas: 1
+    poll-interval-ms: 1000
+    # Turn publishing off to run the catalog with no broker present.
+    enabled: ${EVENTS_ENABLED:true}
+
+  cache:
+    # Per-cache TTLs. Categories change about never; a single destination is
+    # evicted on every edit, so its hour is a backstop rather than the mechanism;
+    # lists are shortest because publishing a NEW destination changes what every
+    # list should contain without touching any single list key.
+    destination: 1h
+    destination-list: 10m
+    attractions-of: 1h
+    categories: 24h
+
   cors:
     # Explicit per environment. Public reads are open, but writes are not, so the
     # same allowlist discipline as auth-service applies.
@@ -89,13 +155,28 @@ management:
         enabled: true
       show-details: never
       group:
-        # Redis joins this group in Step 8. Until then a readiness probe that
-        # checked a bean that does not exist would fail the container.
+        # Redis is deliberately NOT in this group, even though it is now a
+        # dependency. Readiness decides whether the container receives traffic,
+        # and this service serves every request correctly with Redis down — just
+        # slower. Including it would take a healthy catalog out of the load
+        # balancer because a cache is restarting, which is precisely the outage
+        # the CacheErrorHandler exists to prevent. Redis still shows up in
+        # /actuator/health, where it is information rather than a verdict.
         readiness:
           include: readinessState,db
   info:
     env:
       enabled: true
+
+# ── API documentation ─────────────────────────────────────────────────────────
+# Off everywhere by default; application-dev.yml turns it on. A public schema of
+# every admin endpoint, its request body and its validation rules is free
+# reconnaissance, and nothing outside development needs it.
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false
 
 info:
   app:

@@ -27,7 +27,26 @@ management:
     health:
       show-details: always
 
+# http://localhost:8082/swagger-ui.html — generated from the controllers, so it
+# cannot drift from them. SecurityConfig opens these two paths only when
+# api-docs is enabled, which is only here.
+springdoc:
+  api-docs:
+    enabled: true
+    path: /v3/api-docs
+  swagger-ui:
+    enabled: true
+    path: /swagger-ui.html
+    # Endpoints grouped the way the service is: public catalog first, admin
+    # after, rather than alphabetically by controller class name.
+    tags-sorter: alpha
+    operations-sorter: method
+    display-request-duration: true
+
 logging:
   level:
     com.explorelk.destination: DEBUG
     org.flywaydb: INFO
+    # Uncomment to watch the cache work: request the same destination twice and
+    # the second one issues no SQL at all.
+    # org.hibernate.SQL: DEBUG

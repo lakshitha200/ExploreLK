@@ -3,6 +3,7 @@ package com.explorelk.destination.destination;
 import com.explorelk.destination.category.CategoryService;
 import com.explorelk.destination.common.PageResponse;
 import com.explorelk.destination.common.Pagination;
+import com.explorelk.destination.config.CacheConfig;
 import com.explorelk.destination.common.exception.NotFoundException;
 import com.explorelk.destination.common.exception.ValidationException;
 import com.explorelk.destination.destination.dto.DestinationDetailResponse;
@@ -13,6 +14,7 @@ import com.explorelk.destination.search.DestinationSearchSpecs;
 import com.explorelk.destination.search.DestinationSort;
 import com.explorelk.destination.search.NearbyQuery;
 import lombok.RequiredArgsConstructor;
+import org.springframework.cache.annotation.Cacheable;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
@@ -53,6 +55,10 @@ public class DestinationService {
      * @param direction {@code asc} or {@code desc}; anything else uses the sort's
      *                  natural direction
      */
+    @Cacheable(
+            cacheNames = CacheConfig.DESTINATION_LIST,
+            key = "T(com.explorelk.destination.search.DestinationListKey)"
+                    + ".of(#query, #page, #size, #sort, #direction)")
     @Transactional(readOnly = true)
     public PageResponse<DestinationSummaryResponse> list(DestinationQuery query,
                                                          int page,
@@ -77,6 +83,7 @@ public class DestinationService {
      * slug. The two can never collide — the {@code ck_destinations_slug} constraint
      * forbids a slug shaped like a UUID.
      */
+    @Cacheable(cacheNames = CacheConfig.DESTINATION, key = "#idOrSlug")
     @Transactional(readOnly = true)
     public DestinationDetailResponse getPublished(String idOrSlug) {
         Destination destination = asUuid(idOrSlug)

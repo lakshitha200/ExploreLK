@@ -3,11 +3,13 @@ package com.explorelk.destination.attraction;
 import com.explorelk.destination.attraction.dto.AttractionResponse;
 import com.explorelk.destination.attraction.dto.NearbyAttractionResponse;
 import com.explorelk.destination.common.exception.NotFoundException;
+import com.explorelk.destination.config.CacheConfig;
 import com.explorelk.destination.destination.ContentStatus;
 import com.explorelk.destination.destination.Destination;
 import com.explorelk.destination.destination.DestinationRepository;
 import com.explorelk.destination.search.NearbyQuery;
 import lombok.RequiredArgsConstructor;
+import org.springframework.cache.annotation.Cacheable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -34,6 +36,7 @@ public class AttractionService {
      * than an empty list — an empty list would say "Ella has nothing to see",
      * which is a different and wrong answer.
      */
+    @Cacheable(cacheNames = CacheConfig.ATTRACTIONS_OF, key = "#destinationIdOrSlug")
     @Transactional(readOnly = true)
     public List<AttractionResponse> listPublishedOf(String destinationIdOrSlug) {
         Destination destination = asUuid(destinationIdOrSlug)

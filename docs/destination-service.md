@@ -585,6 +585,8 @@ Identical to the Auth Service except for what is genuinely different — PostGIS
 | Flyway silently never runs; Hibernate then fails `validate` against an empty schema | Add `org.springframework.boot:spring-boot-flyway` **alongside** `flyway-core` |
 | `ObjectMapper` not found under `com.fasterxml.jackson.databind` | Jackson 3 — import `tools.jackson.databind.ObjectMapper`; annotations stay at `com.fasterxml.jackson.annotation` |
 | `CorsConfigurationSource` — "required a single bean, but 2 were found" | Use `.cors(Customizer.withDefaults())`, do not inject the type |
+| `@AutoConfigureMockMvc` does not resolve — the test sources will not compile | Boot 4 split the web test slices out of `spring-boot-starter-test`. Add `spring-boot-starter-webmvc-test` (test scope) and import from `org.springframework.boot.webmvc.test.autoconfigure`, not `...boot.test.autoconfigure.web.servlet` |
+| Testcontainers cannot find Docker on Windows: `NpipeSocketClientProviderStrategy … Status 400` | Docker Desktop answers the legacy `docker_engine` pipe with an empty 400. 1.20.x has no fallback; **1.21.x reads the docker context** and finds `desktop-linux` on its own |
 
 **Dependencies this service does *not* need:** `spring-boot-starter-mail`, `spring-security-oauth2-jose` (nothing is signed here), and — deliberately — `hibernate-spatial`, thanks to the generated-column decision in §6.
 
@@ -747,7 +749,7 @@ Nine Arches Bridge at 1.866 km matches the 1.87 km measured by hand back in Step
 
 ---
 
-### Step 8 — Redis caching
+### Step 8 — Redis caching ✅
 
 `CacheConfig` with per-cache TTLs, `@Cacheable` on the read services, eviction after commit on every write path, `CacheErrorHandler` that degrades.
 
@@ -755,7 +757,7 @@ Nine Arches Bridge at 1.866 km matches the 1.87 km measured by hand back in Step
 
 ---
 
-### Step 9 — Outbox + Kafka events
+### Step 9 — Outbox + Kafka events ✅
 
 Copy `outbox_events`, `OutboxWriter` and `OutboxPublisher` from `auth-service` as **`V3__outbox.sql`** — `V2` is the corrected search indexes from Step 4. Write event rows in the same transaction as each publish / update / archive. Publish the six event types from §7.
 
@@ -765,7 +767,7 @@ Copy `outbox_events`, `OutboxWriter` and `OutboxPublisher` from `auth-service` a
 
 ---
 
-### Step 10 — Tests
+### Step 10 — Tests ✅
 
 - **Unit (Mockito):** slug generation, status transition rules, publish-completeness validation, cache key building
 - **Integration (Testcontainers `postgis/postgis:16-3.4` + Redis):** list/filter/search, slug and UUID lookup, draft invisible publicly, archive removes from list, nearby ordering and radius, optimistic-lock conflict returns `409`
@@ -774,15 +776,30 @@ Copy `outbox_events`, `OutboxWriter` and `OutboxPublisher` from `auth-service` a
 
 **Checkpoint:** `mvn verify` green from a clean database.
 
+> **One database is shared by every IT class, so every class can dirty it.** The
+> read tests assert exact counts against the seeded catalog, and the two places
+> `AdminCatalogIT` publishes break them — but only when it happens to run first.
+> `TestContainers` records what exists before each test and deletes anything new
+> afterwards, which makes one test, one class and the whole suite give the same
+> answer.
+
 > The Postgres Testcontainer must be the PostGIS image, or every spatial test fails at `CREATE EXTENSION`. Keep Kafka to a single test — that container costs about 20 s of startup, while Postgres and Redis are cheap.
 
 ---
 
-### Step 11 — Package
+### Step 11 — Package ✅
 
 Multi-stage `Dockerfile`, add `destination-service` to `docker-compose.yml` (depends on postgres + redis, healthcheck on `/actuator/health/readiness`), springdoc at `/swagger-ui.html` in dev, Actuator liveness/readiness, `.env.example` entries, service `README.md`.
 
 **Checkpoint:** `docker compose up` on a clean machine brings up Postgres + Redis + auth + destination, and register → verify → login → admin-create-destination → public-read works end to end across **two** services.
+
+> **Done for this service; the two-service half of the checkpoint waits on auth.**
+> `auth-service` has no Dockerfile yet — that is its own Step 12 — so compose
+> brings up Postgres, Redis, Kafka and `destination-service`, and the container
+> reaches an auth-service running on the host through `AUTH_JWKS_URI_INTERNAL`.
+> Public catalog reads need no token and work either way; the admin endpoints
+> need auth up, wherever it is running. Point that variable at
+> `http://auth-service:8081/...` the moment auth is containerised.
 
 ---
 
@@ -811,11 +828,11 @@ Steps 3 and 4 come **before** security on purpose. Public reads need no token, s
 - [x] The Destination Service verifies tokens with **no** runtime dependency on the Auth Service being up — once its key cache is warm; see §9
 - [x] Drafts and archived content are never visible on a public endpoint
 - [x] Archiving never deletes a row — every id stays resolvable for other services
-- [ ] Repeated reads are served from Redis, and a write invalidates them — Step 8
-- [ ] Redis down = slower, not broken — Step 8
-- [ ] All six events reach Kafka, and survive Kafka being restarted — Step 9
-- [ ] `mvn verify` passes from a clean database — Step 10, and `src/test` is still empty
-- [ ] `docker compose up` works on a clean machine — Step 11, no Dockerfile and no compose entry yet
+- [x] Repeated reads are served from Redis, and a write invalidates them — `CachingIT`
+- [x] Redis down = slower, not broken — `CacheOutageIT` runs the whole catalog against an unreachable Redis
+- [x] All six events reach Kafka, and survive Kafka being restarted — `OutboxEventsIT` covers the six; `OutboxKafkaIT` pauses the broker mid-publish and the event still arrives
+- [x] `mvn verify` passes from a clean database — 90 unit + 71 integration tests
+- [x] `docker compose up` works on a clean machine — `Dockerfile` plus a `destination-service` entry with a readiness healthcheck
 - [x] Seed data is real Sri Lankan content, good enough for Trip and Itinerary development
 
 ---

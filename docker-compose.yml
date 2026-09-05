@@ -105,6 +105,66 @@ services:
       - "1025:1025"
       - "8025:8025"
 
+  # ── Destination Service ───────────────────────────────────────
+  # The catalog: destinations, attractions, categories, proximity search.
+  # http://localhost:8082 — /swagger-ui.html in the dev profile.
+  destination-service:
+    build:
+      context: ./services/destination-service
+      dockerfile: Dockerfile
+    image: explorelk/destination-service:latest
+    container_name: explorelk-destination-service
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8082:8082"
+    environment:
+      SPRING_PROFILES_ACTIVE: ${DESTINATION_PROFILE:-dev}
+
+      # Service names and INTERNAL ports here, never localhost: inside a
+      # container localhost is the container itself. The published 5433/6379
+      # ports are for processes on the host, and using them here is the
+      # classic "connection refused" from an otherwise correct config.
+      DESTINATION_DB_URL: jdbc:postgresql://postgres:5432/${DESTINATION_DB_NAME:-explorelk_destination}
+      DESTINATION_DB_USERNAME: ${POSTGRES_USER:-explorelk}
+      DESTINATION_DB_PASSWORD: ${POSTGRES_PASSWORD:-explorelk}
+
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+
+      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      EVENTS_ENABLED: ${EVENTS_ENABLED:-true}
+
+      # The Auth Service is not in this file yet, so the default reaches back to
+      # one running on the host. Change it to http://auth-service:8081/... the
+      # moment auth is containerised alongside this. Public catalog reads work
+      # either way; only the admin endpoints need a verifiable token.
+      AUTH_JWKS_URI: ${AUTH_JWKS_URI_INTERNAL:-http://host.docker.internal:8081/.well-known/jwks.json}
+      JWT_ISSUER: ${JWT_ISSUER:-explorelk-auth}
+
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:5173}
+    extra_hosts:
+      # Lets the AUTH_JWKS_URI default above resolve on Linux, where
+      # host.docker.internal is not built in the way it is on Desktop.
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      # Readiness, not liveness: the question is "can it serve traffic". Redis is
+      # deliberately outside that group — the catalog answers every request
+      # correctly with the cache down, so a restarting Redis must not mark this
+      # container unhealthy. Defined in the Dockerfile too; repeated here so
+      # `docker compose ps` reports it without depending on the image build.
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8082/actuator/health/readiness || exit 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 90s
+
 volumes:
   postgres-data:
   kafka-data:

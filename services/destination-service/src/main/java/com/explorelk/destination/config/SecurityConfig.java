@@ -12,6 +12,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -81,7 +82,10 @@ public class SecurityConfig {
     private final ObjectMapper objectMapper;
 
     @Bean
-    public SecurityFilterChain filterChain(HttpSecurity http, JwtDecoder jwtDecoder) throws Exception {
+    public SecurityFilterChain filterChain(HttpSecurity http,
+                                          JwtDecoder jwtDecoder,
+                                          @Value("${springdoc.api-docs.enabled:false}") boolean apiDocsEnabled)
+            throws Exception {
         http
                 // No cookies, no sessions, so there is no CSRF vector to protect.
                 .csrf(AbstractHttpConfigurer::disable)
@@ -96,7 +100,18 @@ public class SecurityConfig {
                 // token expiry and keep granting access the token no longer does.
                 .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
 
-                .authorizeHttpRequests(auth -> auth
+                .authorizeHttpRequests(auth -> {
+                    // Swagger, and only where it exists. Opening these paths
+                    // unconditionally would be harmless today — springdoc is not even
+                    // on the classpath's active configuration outside dev — but it
+                    // would silently become a public schema endpoint the day someone
+                    // enables the property in another profile.
+                    if (apiDocsEnabled) {
+                        auth.requestMatchers("/swagger-ui.html", "/swagger-ui/**",
+                                "/v3/api-docs", "/v3/api-docs/**").permitAll();
+                    }
+
+                    auth
                         // A CORS preflight carries no Authorization header, by definition.
                         .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
 
@@ -118,7 +133,8 @@ public class SecurityConfig {
                         // exists — before its author has annotated anything.
                         .requestMatchers("/api/v1/admin/**").hasAnyRole("ADMIN", "SUPER_ADMIN")
 
-                        .anyRequest().authenticated())
+                        .anyRequest().authenticated();
+                })
 
                 .oauth2ResourceServer(oauth -> oauth
                         .jwt(jwt -> jwt

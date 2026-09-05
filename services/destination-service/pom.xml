@@ -20,7 +20,32 @@
     <properties>
         <!-- Matches auth-service. Boot 4's baseline, and an LTS. -->
         <java.version>17</java.version>
+        <testcontainers.version>1.21.4</testcontainers.version>
+        <!--
+            springdoc 3.x is the Spring Boot 4 line. The 2.x releases are built
+            against Boot 3 and fail at startup here on the Spring Framework 7
+            handler-mapping APIs.
+        -->
+        <springdoc.version>3.1.0</springdoc.version>
     </properties>
+
+    <!--
+        Spring Boot's parent does not manage Testcontainers versions, so the BOM
+        pins them here. Without it the three module dependencies below fail the
+        build at POM-parse time with "version is missing" — before any code is
+        even read.
+    -->
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.testcontainers</groupId>
+                <artifactId>testcontainers-bom</artifactId>
+                <version>${testcontainers.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
 
     <dependencies>
 
@@ -96,6 +121,60 @@
             <artifactId>spring-boot-starter-validation</artifactId>
         </dependency>
 
+        <!--
+            Cache. Spring's cache abstraction over Redis: no hand-written
+            RedisTemplate calls in service code. Redis holds only derived data
+            here, so losing it costs latency and nothing else — see CacheConfig.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
+        <!--
+            Lettuce connection pooling. NOT pulled in by the starter: without it
+            `spring.data.redis.lettuce.pool.enabled: true` fails at startup with
+            NoClassDefFoundError on GenericObjectPoolConfig, which reads as a
+            Spring bug and is really a missing optional dependency.
+        -->
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-pool2</artifactId>
+        </dependency>
+
+        <!--
+            Messaging. Kafka is NOT on the read path: browsing, searching and
+            proximity are plain REST. Events exist only so other services learn
+            the catalog changed underneath them, which is why a broker outage
+            degrades nothing here — the outbox keeps accepting events into
+            Postgres and drains when Kafka returns.
+        -->
+        <!--
+            The STARTER, not spring-kafka on its own. Boot 4 moved every
+            auto-configuration out of the monolithic spring-boot-autoconfigure
+            jar and into per-technology modules, exactly as it did for Flyway
+            above: with only spring-kafka present the library is on the
+            classpath but nothing configures it, and the app dies at startup on
+            "No qualifying bean of type KafkaTemplate<String, String>" — which
+            reads as a generics problem and is really a missing module.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-kafka</artifactId>
+        </dependency>
+
+        <!--
+            API documentation. Generated from the controllers and their DTOs, so
+            it cannot drift from the code the way a hand-written document does.
+            Switched OFF by default in application.yml and turned on only by the
+            dev profile: a public schema of every admin endpoint is free
+            reconnaissance, and there is no reason to serve it in production.
+        -->
+        <dependency>
+            <groupId>org.springdoc</groupId>
+            <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+            <version>${springdoc.version}</version>
+        </dependency>
+
         <!-- Health / metrics -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -115,19 +194,85 @@
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
         </dependency>
+        <dependency>
+            <groupId>org.springframework.security</groupId>
+            <artifactId>spring-security-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!--
+            MockMvc. Boot 4 split the web test slices out of
+            spring-boot-starter-test into per-stack modules, so
+            @AutoConfigureMockMvc is no longer on the classpath by default and
+            its package moved to org.springframework.boot.webmvc.test.
+            Without this the test sources do not compile at all.
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-webmvc-test</artifactId>
+            <scope>test</scope>
+        </dependency>
 
         <!--
-            Added in later steps, listed here so the order is not a mystery:
-              Step 8  spring-boot-starter-data-redis
-              Step 9  spring-kafka
-              Step 10 testcontainers (postgis image), rest-assured
-              Step 11 springdoc-openapi-starter-webmvc-ui
+            Integration tests run against real Postgres and Redis, never an
+            in-memory substitute. H2 has no PostGIS, no JSONB and no trigram
+            index, so a suite built on it would pass while the three things this
+            service actually depends on went untested.
+
+            The Postgres image MUST be the PostGIS one, or every spatial test
+            fails on the first line of V1__init.sql at CREATE EXTENSION.
         -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-testcontainers</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>kafka</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- Polling for an event that arrives on a scheduler, without Thread.sleep. -->
+        <dependency>
+            <groupId>org.awaitility</groupId>
+            <artifactId>awaitility</artifactId>
+            <scope>test</scope>
+        </dependency>
 
     </dependencies>
 
     <build>
         <plugins>
+            <!--
+                Unit tests run in `mvn test`; the *IT integration tests run in
+                `mvn verify`, through failsafe. The split matters because the IT
+                suite needs Docker: a developer without it running can still get
+                fast feedback from the unit tests instead of a wall of container
+                errors.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>

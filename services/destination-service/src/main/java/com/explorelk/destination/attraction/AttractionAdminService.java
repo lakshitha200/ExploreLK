@@ -4,6 +4,7 @@ import com.explorelk.destination.attraction.dto.AttractionAdminResponse;
 import com.explorelk.destination.attraction.dto.CreateAttractionRequest;
 import com.explorelk.destination.attraction.dto.UpdateAttractionRequest;
 import com.explorelk.destination.category.CategoryService;
+import com.explorelk.destination.common.CatalogCache;
 import com.explorelk.destination.common.ErrorCode;
 import com.explorelk.destination.common.SlugGenerator;
 import com.explorelk.destination.common.exception.AppException;
@@ -12,6 +13,8 @@ import com.explorelk.destination.common.exception.ValidationException;
 import com.explorelk.destination.destination.ContentStatus;
 import com.explorelk.destination.destination.Destination;
 import com.explorelk.destination.destination.DestinationAdminService;
+import com.explorelk.destination.outbox.CatalogEventType;
+import com.explorelk.destination.outbox.OutboxWriter;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -42,6 +45,8 @@ public class AttractionAdminService {
     private final DestinationAdminService destinationAdminService;
     private final CategoryService categoryService;
     private final OpeningHoursCodec openingHoursCodec;
+    private final CatalogCache catalogCache;
+    private final OutboxWriter outboxWriter;
 
     // ── Reads ────────────────────────────────────────────────────────────────
 
@@ -173,6 +178,14 @@ public class AttractionAdminService {
         // audit timestamp is written at flush; mapping before it reports the value
         // from the previous save.
         Attraction saved = attractionRepository.saveAndFlush(attraction);
+        evictParent(saved);
+
+        // The most consequential event in the service. An itinerary built around
+        // a 90-minute visit is quietly wrong the moment that becomes 180, and
+        // nothing else would ever tell the Itinerary Service.
+        if (saved.getStatus() == ContentStatus.PUBLISHED) {
+            outboxWriter.write(CatalogEventType.ATTRACTION_UPDATED, saved);
+        }
         log.info("Attraction updated: {} ({})", saved.getSlug(), saved.getId());
 
         return AttractionAdminResponse.from(saved);
@@ -199,6 +212,13 @@ public class AttractionAdminService {
         attraction.setStatus(target);
 
         Attraction saved = attractionRepository.saveAndFlush(attraction);
+        evictParent(saved);
+
+        if (target == ContentStatus.PUBLISHED) {
+            outboxWriter.write(CatalogEventType.ATTRACTION_PUBLISHED, saved);
+        } else if (target == ContentStatus.ARCHIVED) {
+            outboxWriter.write(CatalogEventType.ATTRACTION_ARCHIVED, saved);
+        }
         log.info("Attraction {} moved {} -> {}", saved.getSlug(), current, target);
 
         return AttractionAdminResponse.from(saved);
@@ -219,10 +239,23 @@ public class AttractionAdminService {
             return;
         }
         attraction.setStatus(ContentStatus.ARCHIVED);
+        evictParent(attraction);
+        outboxWriter.write(CatalogEventType.ATTRACTION_ARCHIVED, attraction);
         log.info("Attraction archived: {} ({})", attraction.getSlug(), id);
     }
 
     // ── Internals ────────────────────────────────────────────────────────────
+
+    /**
+     * Every attraction write invalidates its destination's cached list.
+     *
+     * <p>Creating one does not, and does not call this: a new attraction is a
+     * DRAFT, so no public read can be holding it yet.
+     */
+    private void evictParent(Attraction attraction) {
+        Destination destination = attraction.getDestination();
+        catalogCache.evictAttractionsOf(destination.getId(), destination.getSlug());
+    }
 
     private Attraction require(UUID id) {
         return attractionRepository.findById(id)

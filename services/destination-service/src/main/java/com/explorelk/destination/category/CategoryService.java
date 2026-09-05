@@ -4,9 +4,12 @@ import com.explorelk.destination.category.dto.CategoryResponse;
 import com.explorelk.destination.category.dto.CreateCategoryRequest;
 import com.explorelk.destination.common.ErrorCode;
 import com.explorelk.destination.common.exception.AppException;
+import com.explorelk.destination.common.CatalogCache;
 import com.explorelk.destination.common.exception.ValidationException;
+import com.explorelk.destination.config.CacheConfig;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.cache.annotation.Cacheable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -29,7 +32,9 @@ import java.util.stream.Collectors;
 public class CategoryService {
 
     private final CategoryRepository categoryRepository;
+    private final CatalogCache catalogCache;
 
+    @Cacheable(cacheNames = CacheConfig.CATEGORIES, key = "'all'")
     @Transactional(readOnly = true)
     public List<CategoryResponse> listAll() {
         return categoryRepository.findAllByOrderBySortOrderAscNameAsc().stream()
@@ -109,6 +114,7 @@ public class CategoryService {
                 .build();
 
         Category saved = categoryRepository.save(category);
+        catalogCache.evictCategories();
         log.info("Category created: {}", saved.getCode());
 
         return CategoryResponse.from(saved);
